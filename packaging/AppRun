@@ -1,0 +1,59 @@
+#!/bin/sh
+# Starts Termite from the AppImage: the bundled Python, GTK 4 and
+# libadwaita, with the host's graphics, fonts and CA certificates.
+HERE="$(dirname "$(readlink -f "$0")")"
+
+# The variables this changes, kept for the programs Termite starts (the
+# browser, nmcli, openconnect), which must not load the bundled libraries
+# (termite.sso.host_env puts them back).
+VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE GSK_RENDERER"
+unset_vars=""
+for v in $VARS; do
+  if eval "[ \"\${$v+set}\" = set ]"; then
+    eval "export TERMITE_HOST_$v=\"\$$v\""
+  else
+    unset_vars="$unset_vars $v"
+  fi
+done
+export TERMITE_HOST_VARS="$VARS" TERMITE_HOST_UNSET="$unset_vars"
+
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PYTHONHOME="$HERE/usr"
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
+export GI_TYPELIB_PATH="$HERE/usr/lib/girepository-1.0"
+export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"
+# Only the bundled GIO and GTK modules (dconf, for the desktop's settings):
+# the host's are built against its own, newer, GLib and GTK.
+export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
+export GTK_EXE_PREFIX="$HERE/usr"
+export GTK_DATA_PREFIX="$HERE/usr"
+unset GTK_PATH
+# The host's icon themes first, the bundled Adwaita as the fallback.
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$HERE/usr/share"
+# Software rendering: a form like this doesn't need the GPU, and it keeps
+# the host's GL drivers (and the libraries they need) out of the process.
+export GSK_RENDERER="${GSK_RENDERER:-cairo}"
+
+# The bundled OpenSSL looks for CA certificates where Debian keeps them; use
+# the host's bundle, wherever its distribution keeps it.
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+  for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+    /etc/ssl/ca-bundle.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem; do
+    if [ -r "$f" ]; then
+      export SSL_CERT_FILE="$f"
+      break
+    fi
+  done
+fi
+
+# Image loaders (SVG icons): the cache holds absolute paths, so it is made
+# for wherever the AppImage is mounted this time.
+cache_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/termite-appimage-$(id -u)"
+mkdir -p "$cache_dir" 2>/dev/null
+export GDK_PIXBUF_MODULE_FILE="$cache_dir/loaders.cache"
+"$HERE/usr/bin/gdk-pixbuf-query-loaders" "$HERE"/usr/lib/gdk-pixbuf-2.0/loaders/*.so >"$GDK_PIXBUF_MODULE_FILE.$$" 2>/dev/null &&
+  mv -f "$GDK_PIXBUF_MODULE_FILE.$$" "$GDK_PIXBUF_MODULE_FILE"
+
+# A script, not -m: that would put the current directory on sys.path.
+exec "$HERE/usr/bin/python3" -s "$HERE/usr/bin/termite" "$@"

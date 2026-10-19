@@ -1,0 +1,16 @@
+#!/bin/sh
+# A stand-in for nmcli: logs its arguments, keeps the connection state in
+# $FAKE_NM, and copies a passwd-file it is given.
+echo "$*" >>"$FAKE_NM/calls"
+case "$*" in
+  "-t -f RUNNING general") echo running ;;
+  "-t -f NAME connection show") cat "$FAKE_NM/connections" 2>/dev/null ;;
+  "-t -f NAME connection show --active") cat "$FAKE_NM/active" 2>/dev/null ;;
+  "-g vpn.service-type connection show "*) echo org.freedesktop.NetworkManager.openconnect ;;
+  "connection add "*) echo "Termite" >>"$FAKE_NM/connections" ;;
+  "--wait 120 connection up "*)
+    eval "f=\${$#}"
+    cat "$f" >"$FAKE_NM/secrets"
+    echo "Termite" >"$FAKE_NM/active" ;;
+  "connection down "*) : >"$FAKE_NM/active" ;;
+esac

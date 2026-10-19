@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Termite: a termite popping out of its tunnel (termites dig tunnels; so does a VPN) -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#99c1f1"/>
+      <stop offset="1" stop-color="#62a0ea"/>
+    </linearGradient>
+    <linearGradient id="mound" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cdab8f"/>
+      <stop offset="1" stop-color="#986a44"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffbe6f"/>
+      <stop offset="1" stop-color="#e66100"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="8" y="8" width="112" height="112" rx="26"/>
+    </clipPath>
+  </defs>
+
+  <!-- the tile, with the depth Adwaita icons have below -->
+  <rect x="8" y="12" width="112" height="112" rx="26" fill="#1a5fb4"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#sky)"/>
+
+  <g clip-path="url(#tile)">
+    <!-- the mound, and the tunnel in it -->
+    <path d="M-4 128 C 6 92 22 70 64 66 C 106 70 122 92 132 128 Z" fill="url(#mound)"/>
+    <path d="M14 112 c6-3 10-3 16 0 M88 98 c5-3 9-3 14 0 M28 88 c4-2 7-2 11 0" stroke="#865e3c" stroke-width="3" stroke-linecap="round" fill="none"/>
+    <ellipse cx="64" cy="104" rx="30" ry="15" fill="#3d2a1b"/>
+    <ellipse cx="64" cy="107" rx="24" ry="10" fill="#241811"/>
+
+    <!-- the termite: body coming out of the tunnel -->
+    <path d="M44 106 C 44 84 52 74 64 74 C 76 74 84 84 84 106 Z" fill="url(#body)"/>
+    <path d="M47 94 C 56 98 72 98 81 94" stroke="#c64600" stroke-width="3" stroke-linecap="round" fill="none"/>
+    <!-- little arms waving -->
+    <path d="M46 92 C 36 88 32 82 30 74" stroke="#c64600" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <path d="M82 92 C 92 88 96 82 98 74" stroke="#c64600" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <circle cx="30" cy="73" r="3.5" fill="#c64600"/>
+    <circle cx="98" cy="73" r="3.5" fill="#c64600"/>
+
+    <!-- head -->
+    <ellipse cx="64" cy="58" rx="24" ry="21" fill="url(#body)"/>
+    <!-- antennae -->
+    <path d="M54 40 C 50 28 42 22 34 22" stroke="#c64600" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <path d="M74 40 C 78 28 86 22 94 22" stroke="#c64600" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <circle cx="33" cy="22" r="5" fill="#ffbe6f" stroke="#c64600" stroke-width="3"/>
+    <circle cx="95" cy="22" r="5" fill="#ffbe6f" stroke="#c64600" stroke-width="3"/>
+    <!-- big friendly eyes -->
+    <ellipse cx="55" cy="56" rx="7.5" ry="9" fill="#ffffff"/>
+    <ellipse cx="73" cy="56" rx="7.5" ry="9" fill="#ffffff"/>
+    <circle cx="56.5" cy="58" r="4.5" fill="#241f31"/>
+    <circle cx="74.5" cy="58" r="4.5" fill="#241f31"/>
+    <circle cx="58" cy="56" r="1.6" fill="#ffffff"/>
+    <circle cx="76" cy="56" r="1.6" fill="#ffffff"/>
+    <!-- cheeks, and a grin with two buck teeth for chewing through things -->
+    <ellipse cx="46" cy="66" rx="4" ry="2.5" fill="#f66151" opacity="0.6"/>
+    <ellipse cx="82" cy="66" rx="4" ry="2.5" fill="#f66151" opacity="0.6"/>
+    <path d="M57 69 C 61 73 67 73 71 69" stroke="#241f31" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+    <rect x="60.5" y="70.5" width="3.3" height="4.5" rx="1" fill="#ffffff" stroke="#241f31" stroke-width="1"/>
+    <rect x="64.2" y="70.5" width="3.3" height="4.5" rx="1" fill="#ffffff" stroke="#241f31" stroke-width="1"/>
+
+    <!-- a hard hat: it is a tunnelling professional -->
+    <path d="M42 46 C 42 30 52 24 64 24 C 76 24 86 30 86 46 Z" fill="#f6d32d"/>
+    <rect x="38" y="43" width="52" height="7" rx="3.5" fill="#e5a50a"/>
+    <rect x="61" y="25" width="6" height="19" rx="3" fill="#e5a50a"/>
+    <!-- the headlamp, lighting the way -->
+    <circle cx="64" cy="35" r="5" fill="#ffffff" stroke="#e5a50a" stroke-width="2"/>
+  </g>
+</svg>
