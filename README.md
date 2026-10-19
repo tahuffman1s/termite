@@ -57,7 +57,10 @@ openSUSE Tumbleweed, ...) and, on the host:
   `openconnect` and polkit's `pkexec`.
 
 Python, GTK, libadwaita and OpenSSL are inside the AppImage; graphics, fonts and
-CA certificates come from the system. The AppImage uses the static AppImage
+CA certificates come from the system. Common libraries every desktop has
+(fontconfig, X11, zlib, ...) come from the system too, or from the AppImage
+on systems that keep them elsewhere, like NixOS (where `programs.nix-ld`
+must be on, as for any AppImage run directly, or use `appimage-run`). The AppImage uses the static AppImage
 runtime, so it doesn't need `libfuse2`. Tools like Gear Lever or
 AppImageLauncher add it to the app menu.
 

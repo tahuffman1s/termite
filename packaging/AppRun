@@ -6,7 +6,7 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # The variables this changes, kept for the programs Termite starts (the
 # browser, nmcli, openconnect), which must not load the bundled libraries
 # (termite.sso.host_env puts them back).
-VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE GSK_RENDERER"
+VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE GSK_RENDERER FONTCONFIG_FILE"
 unset_vars=""
 for v in $VARS; do
   if eval "[ \"\${$v+set}\" = set ]"; then
@@ -17,7 +17,26 @@ for v in $VARS; do
 done
 export TERMITE_HOST_VARS="$VARS" TERMITE_HOST_UNSET="$unset_vars"
 
-export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+cache_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/termite-appimage-$(id -u)"
+mkdir -p "$cache_dir" 2>/dev/null
+
+# The common libraries in usr/lib/fallback, for the ones this system
+# doesn't keep in the usual places (NixOS): links to them in a directory of
+# this run's own, as the AppImage is mounted somewhere new each time.
+for d in "$cache_dir"/lib-*; do
+  [ -d "$d" ] && [ ! -d "$(cat "$d/.from" 2>/dev/null)" ] && rm -rf "$d"
+done
+fallback_dir="$cache_dir/lib-$$"
+mkdir -p "$fallback_dir" && printf '%s' "$HERE" >"$fallback_dir/.from"
+for f in "$HERE"/usr/lib/fallback/*; do
+  n="${f##*/}"
+  for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /lib64 /usr/lib /lib; do
+    [ -e "$d/$n" ] && continue 2
+  done
+  ln -sf "$f" "$fallback_dir/$n"
+done
+
+export LD_LIBRARY_PATH="$HERE/usr/lib:$fallback_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONHOME="$HERE/usr"
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
@@ -35,6 +54,9 @@ export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$HERE/usr/sh
 # the host's GL drivers (and the libraries they need) out of the process.
 export GSK_RENDERER="${GSK_RENDERER:-cairo}"
 
+# Fonts: the system's fontconfig setup, or the usual font directories.
+[ -e /etc/fonts/fonts.conf ] || [ -n "${FONTCONFIG_FILE:-}" ] || export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+
 # The bundled OpenSSL looks for CA certificates where Debian keeps them; use
 # the host's bundle, wherever its distribution keeps it.
 if [ -z "${SSL_CERT_FILE:-}" ]; then
@@ -49,8 +71,6 @@ fi
 
 # Image loaders (SVG icons): the cache holds absolute paths, so it is made
 # for wherever the AppImage is mounted this time.
-cache_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/termite-appimage-$(id -u)"
-mkdir -p "$cache_dir" 2>/dev/null
 export GDK_PIXBUF_MODULE_FILE="$cache_dir/loaders.cache"
 "$HERE/usr/bin/gdk-pixbuf-query-loaders" "$HERE"/usr/lib/gdk-pixbuf-2.0/loaders/*.so >"$GDK_PIXBUF_MODULE_FILE.$$" 2>/dev/null &&
   mv -f "$GDK_PIXBUF_MODULE_FILE.$$" "$GDK_PIXBUF_MODULE_FILE"

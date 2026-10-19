@@ -79,6 +79,15 @@ cp "$ARCH_LIB/gio/modules/libdconfsettings.so" "$LIB/gio/modules/"
 
 # Every library those need, except the ones the host has to provide.
 excluded="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$SRC/packaging/excludelist" | grep -v '^$')"
+# Of those, the ones every desktop has but not where an AppImage looks on
+# some systems (NixOS keeps them in /nix/store): bundled in usr/lib/fallback,
+# which AppRun uses only for the ones the host doesn't have in the usual
+# places. Only glibc and the graphics drivers' libraries are always the
+# host's.
+fallback="libstdc++.so.6 libgcc_s.so.1 libz.so.1 libexpat.so.1 libuuid.so.1 libgmp.so.10 libfribidi.so.0
+libfontconfig.so.1 libfreetype.so.6 libharfbuzz.so.0 libX11.so.6 libX11-xcb.so.1 libxcb.so.1
+libwayland-client.so.0 libcom_err.so.2 libgpg-error.so.0 libICE.so.6 libSM.so.6"
+mkdir -p "$LIB/fallback"
 # Loaded by soname (typelibs, dlopen), so not in any ldd output.
 roots=(
   "$APPDIR/usr/bin/python3" "$APPDIR/usr/bin/gdk-pixbuf-query-loaders"
@@ -100,6 +109,11 @@ while [ "${#queue[@]}" -gt 0 ]; do
     [ -n "$path" ] && [ -f "$path" ] || continue
     [ -z "${seen[$name]:-}" ] || continue
     seen[$name]=1
+    if tr ' ' '\n' <<<"$fallback" | grep -Fxq "$name"; then
+      cp -L "$path" "$LIB/fallback/$name"
+      queue+=("$LIB/fallback/$name")
+      continue
+    fi
     grep -Fxq "$name" <<<"$excluded" && continue
     [ -f "$LIB/$name" ] || cp -L "$path" "$LIB/$name"
     queue+=("$LIB/$name")
@@ -133,12 +147,13 @@ cp "$SRC/data/io.github.tahuffman1s.Termite.desktop" "$APPDIR/usr/share/applicat
 cp "$SRC/data/io.github.tahuffman1s.Termite.desktop" "$SRC/termite/data/io.github.tahuffman1s.Termite.svg" "$APPDIR/"
 ln -s io.github.tahuffman1s.Termite.svg "$APPDIR/.DirIcon"
 install -m755 "$SRC/packaging/AppRun" "$APPDIR/AppRun"
+install -Dm644 "$SRC/packaging/fonts.conf" "$APPDIR/etc/fonts/fonts.conf"
 
 # Byte-compiled up front: the AppImage is read-only when it runs.
-PYTHONHOME="$APPDIR/usr" LD_LIBRARY_PATH="$LIB" "$APPDIR/usr/bin/python3" -s -m compileall -q -j0 "$LIB/python$PYVER" "$DIST" >/dev/null
+PYTHONHOME="$APPDIR/usr" LD_LIBRARY_PATH="$LIB:$LIB/fallback" "$APPDIR/usr/bin/python3" -s -m compileall -q -j0 "$LIB/python$PYVER" "$DIST" >/dev/null
 
 # Smoke test before packing: everything imports from the AppDir alone.
-GI_TYPELIB_PATH="$LIB/girepository-1.0" PYTHONHOME="$APPDIR/usr" LD_LIBRARY_PATH="$LIB" \
+GI_TYPELIB_PATH="$LIB/girepository-1.0" PYTHONHOME="$APPDIR/usr" LD_LIBRARY_PATH="$LIB:$LIB/fallback" \
   "$APPDIR/usr/bin/python3" -s -c '
 import gi, ssl, cryptography
 gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
