@@ -38,6 +38,29 @@ Profiles are kept in `~/.local/share/termite/<browser>/` (for a snap browser,
 `~/snap/<browser>/common/termite/`). Flatpak browsers can't be driven this
 way; use a distribution package or the vendor's own package.
 
+### No browser? Download ungoogled-chromium
+
+Without a Chromium-based browser installed (or to keep the sign-in out of
+yours), **Download** in the window (or `termite get-browser`) fetches the latest
+portable [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium-portablelinux)
+into `~/.local/share/termite/browser/`: a 160 MB download, about 550 MB on
+disk (its translations other than English and your desktop's language are left
+out). It is used only by Termite; **Update** gets a newer version and the bin
+button removes it. It isn't in the AppImage, so the AppImage stays small for
+everyone who has a browser already.
+
+ungoogled-chromium doesn't talk to the Chrome Web Store by itself. The first
+**Add extensions** with it also offers the
+[Chromium Web Store](https://github.com/NeverDecaf/chromium-web-store)
+extension, which adds the store's install buttons and keeps extensions up to
+date: accept its "Add extension" prompt, then install the others from the store
+as usual.
+
+Its sandbox uses unprivileged user namespaces (the portable build has no
+setuid helper). Where the system turns those off (Ubuntu 24.04's AppArmor
+default), it runs without the sandbox. On NixOS, install `pkgs.ungoogled-chromium`
+with Nix instead; downloaded builds can't find their libraries there.
+
 ## Install
 
 Download `Termite-<version>-x86_64.AppImage` from the
@@ -75,6 +98,7 @@ termite disconnect | status      the NetworkManager connection
 termite browser [store|extensions|settings|URL]
 termite sign-in GATEWAY [GROUP]  only sign in; print the session as JSON
 termite info                     what was found on this system
+termite get-browser [--remove]   download (or update, or remove) ungoogled-chromium
 ```
 
 With openconnect, `connect` stays in the foreground (it uses `sudo` in a

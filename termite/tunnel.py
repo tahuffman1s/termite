@@ -232,6 +232,7 @@ class OpenConnect:
         if status != "connected":
             self.proc.wait()
             self.proc.stdout.close()
+            self.proc.stdin.close()
             self.proc = None
             if self.elevate == "pkexec" and status == "" and not errors:
                 raise TunnelError("the administrator password was not given")

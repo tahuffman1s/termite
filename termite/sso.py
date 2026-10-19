@@ -85,9 +85,59 @@ def which(cmd, sbin=False):
     return shutil.which(cmd, path=path)
 
 
+def data_dir():
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "termite")
+
+
+def downloaded_dir():
+    """Where Termite keeps the ungoogled-chromium it downloads (getbrowser)."""
+    return os.path.join(data_dir(), "browser", "ungoogled-chromium")
+
+
+def downloaded_browser():
+    path = os.path.join(downloaded_dir(), "chrome")
+    return path if os.access(path, os.X_OK) else None
+
+
+def is_downloaded(browser):
+    return bool(browser) and os.path.dirname(os.path.realpath(browser)) == os.path.realpath(downloaded_dir())
+
+
+def userns_restricted():
+    """Whether unprivileged user namespaces, which Chromium's sandbox needs
+    without its setuid helper, are turned off (Ubuntu 24.04's AppArmor
+    default, or an old Debian switch)."""
+    for path, off in (("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "1"), ("/proc/sys/kernel/unprivileged_userns_clone", "0")):
+        try:
+            with open(path) as f:
+                if f.read().strip() == off:
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+def browser_args(browser):
+    """Extra switches for the downloaded ungoogled-chromium: installing
+    extensions from outside the Web Store (which ungoogled-chromium doesn't
+    talk to; the Chromium Web Store extension does), and no sandbox where
+    the system doesn't allow the one it can use (it comes without the
+    setuid helper)."""
+    if not is_downloaded(browser):
+        return []
+    args = ["--extension-mime-request-handling=always-prompt-for-install"]
+    if userns_restricted():
+        args.append("--no-sandbox")
+    return args
+
+
 def find_browsers():
-    """The installed Chromium-based browsers, as [(name, path)]."""
+    """The Chromium-based browsers here, as [(name, path)]: the downloaded
+    ungoogled-chromium first, if there is one, then the installed ones."""
     found, seen = [], set()
+    if downloaded_browser():
+        found.append(("ungoogled-chromium (downloaded)", downloaded_browser()))
+        seen.add(os.path.realpath(downloaded_browser()))
     for name, cmds in BROWSERS:
         for cmd in cmds:
             path = which(cmd)
@@ -111,13 +161,14 @@ def default_profile(browser):
     ~/.local/share/termite/chromium."""
     if os.environ.get("TERMITE_PROFILE"):
         return os.environ["TERMITE_PROFILE"]
+    if is_downloaded(browser):
+        return os.path.join(data_dir(), "ungoogled-chromium")
     base = os.path.basename(browser or "chromium")
     kind = re.sub(r"-(stable|browser|beta|dev|unstable)$", "", base) or "chromium"
     if browser and (browser.startswith("/snap/") or os.path.realpath(browser).startswith("/snap/")):
         # A snap browser can only write to its own directory under ~/snap.
         return os.path.expanduser(f"~/snap/{base}/common/termite")
-    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.join(data, "termite", kind)
+    return os.path.join(data_dir(), kind)
 
 
 # Pages to open the sign-in profile on, to set it up: add a password manager
@@ -130,14 +181,14 @@ SETUP_PAGES = {
 }
 
 
-def open_profile(browser, profile, page="extensions"):
+def open_profile(browser, profile, page="extensions", extra_urls=()):
     """The sign-in profile in a normal browser window; returns the process.
     It has to be closed before signing in, since one profile can only be
     open in one browser process."""
     os.makedirs(profile, exist_ok=True)
-    url = SETUP_PAGES.get(page, page)
+    urls = [*extra_urls, SETUP_PAGES.get(page, page)]
     return subprocess.Popen(
-        [browser, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", url],
+        [browser, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", *browser_args(browser), *urls],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -312,6 +363,7 @@ class Chromium:
                 "--remote-debugging-pipe",
                 "--no-first-run",
                 "--no-default-browser-check",
+                *browser_args(browser),
                 f"--app={url}",
             ],
             preexec_fn=child_fds,

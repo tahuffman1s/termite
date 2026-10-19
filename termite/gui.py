@@ -11,7 +11,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import APP_ID, __version__, config, sso, tunnel  # noqa: E402
+from . import APP_ID, __version__, config, getbrowser, sso, tunnel  # noqa: E402
 
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", f"{APP_ID}.svg")
 
@@ -74,7 +74,8 @@ class Window(Adw.ApplicationWindow):
         self.busy = False
         self.cancel = None
         self.setup_proc = None
-        self.browsers = sso.find_browsers()
+        self.browsers = []
+        self.browser_paths = []
 
         self.title = Adw.WindowTitle(title="Termite", subtitle="")
         header = Adw.HeaderBar(title_widget=self.title)
@@ -154,31 +155,120 @@ class Window(Adw.ApplicationWindow):
             "To sign in with a password manager or passkey extension, add it to that profile here, "
             "and close the window before connecting.",
         )
-        names = [name for name, _ in self.browsers]
-        self.browser_paths = [path for _, path in self.browsers]
-        if self.cfg["browser"] and self.cfg["browser"] not in self.browser_paths:
-            names.append(os.path.basename(self.cfg["browser"]))
-            self.browser_paths.append(self.cfg["browser"])
         self.browser_row = Adw.ComboRow(title="Browser")
-        if names:
-            self.browser_row.set_model(Gtk.StringList.new(names))
-            if self.cfg["browser"] in self.browser_paths:
-                self.browser_row.set_selected(self.browser_paths.index(self.cfg["browser"]))
-            self.browser_row.connect("notify::selected", lambda *_: self.update_browser_subtitle())
-        else:
-            self.browser_row.set_model(Gtk.StringList.new(["None found"]))
-            self.browser_row.set_sensitive(False)
+        self.browser_row.connect("notify::selected", lambda *_: self.update_browser_subtitle())
         group.add(self.browser_row)
-        self.update_browser_subtitle()
+        group.add(self.build_download_row())
         self.setup_rows = [
             link_row("Add extensions", "The Chrome Web Store, in the sign-in profile", lambda: self.open_profile("store")),
             link_row("Manage extensions", "Turn extensions on or off, or remove them", lambda: self.open_profile("extensions")),
             link_row("Browser settings", "Passwords, passkeys, proxy and the rest", lambda: self.open_profile("settings")),
         ]
         for row in self.setup_rows:
-            row.set_sensitive(bool(names))
             group.add(row)
+        self.refresh_browsers()
         return group
+
+    def refresh_browsers(self, select=None):
+        """The browser list, again (after a download or removal)."""
+        self.browsers = sso.find_browsers()
+        names = [name for name, _ in self.browsers]
+        self.browser_paths = [path for _, path in self.browsers]
+        if self.cfg["browser"] and self.cfg["browser"] not in self.browser_paths and os.path.exists(self.cfg["browser"]):
+            names.append(os.path.basename(self.cfg["browser"]))
+            self.browser_paths.append(self.cfg["browser"])
+        self.browser_row.set_model(Gtk.StringList.new(names or ["None"]))
+        self.browser_row.set_sensitive(bool(names))
+        want = select or self.cfg["browser"]
+        if want in self.browser_paths:
+            self.browser_row.set_selected(self.browser_paths.index(want))
+        for row in self.setup_rows:
+            row.set_sensitive(bool(names))
+        self.update_browser_subtitle()
+        self.update_download_row()
+
+    def build_download_row(self):
+        """Download, update or remove ungoogled-chromium (getbrowser)."""
+        self.download_row = Adw.ActionRow(title="ungoogled-chromium")
+        self.download_progress = Gtk.ProgressBar(valign=Gtk.Align.CENTER, width_request=120, visible=False)
+        self.download_button = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.download_button.connect("clicked", self.on_download)
+        self.remove_button = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Remove the downloaded browser")
+        self.remove_button.add_css_class("flat")
+        self.remove_button.connect("clicked", self.on_remove_download)
+        for w in (self.download_progress, self.download_button, self.remove_button):
+            self.download_row.add_suffix(w)
+        self.download_cancel = None
+        return self.download_row
+
+    def update_download_row(self):
+        if self.download_cancel is not None:
+            return
+        reason = getbrowser.unsupported()
+        version = getbrowser.installed_version() if sso.downloaded_browser() else None
+        self.download_progress.set_visible(False)
+        self.download_button.set_visible(reason is None)
+        self.download_button.set_sensitive(True)
+        self.remove_button.set_visible(version is not None)
+        if reason:
+            self.download_row.set_subtitle(reason)
+        elif version:
+            self.download_row.set_subtitle(f"Downloaded, version {version}; used only by Termite")
+            self.download_button.set_label("Update")
+        else:
+            self.download_row.set_subtitle(f"A browser just for signing in ({getbrowser.SIZE_HINT})")
+            self.download_button.set_label("Download")
+
+    def on_download(self, *_):
+        if self.download_cancel is not None:
+            self.download_cancel.set()
+            self.download_button.set_sensitive(False)
+            return
+        if self.setup_browser_open() and sso.is_downloaded(self.selected_browser()):
+            self.toast("Close the browser profile window first")
+            return
+        cancel = self.download_cancel = threading.Event()
+        self.download_button.set_label("Cancel")
+        self.remove_button.set_visible(False)
+        self.download_progress.set_visible(True)
+        self.download_progress.set_fraction(0)
+        self.download_row.set_subtitle("Downloading…")
+
+        def progress(fraction):
+            def show():
+                if fraction is None:
+                    self.download_progress.pulse()
+                    self.download_row.set_subtitle("Unpacking…")
+                else:
+                    self.download_progress.set_fraction(fraction)
+                return False
+
+            GLib.idle_add(show)
+
+        def done(version, error):
+            self.download_cancel = None
+            if error is not None:
+                self.log(f"error: {error}")
+                if str(error) != "cancelled":
+                    self.toast(f"Could not download ungoogled-chromium: {error}")
+            else:
+                self.toast(f"ungoogled-chromium {version} is ready")
+                self.cfg["browser"] = sso.downloaded_browser()
+            self.refresh_browsers(select=sso.downloaded_browser() if error is None else None)
+            self.read_settings()
+
+        background(lambda: getbrowser.install(progress, self.log, cancel), done)
+
+    def on_remove_download(self, *_):
+        if self.setup_browser_open() and sso.is_downloaded(self.selected_browser()):
+            self.toast("Close the browser profile window first")
+            return
+        getbrowser.remove()
+        if sso.is_downloaded(self.cfg["browser"]):
+            self.cfg["browser"] = ""
+        self.refresh_browsers()
+        self.read_settings()
+        self.toast("Removed the downloaded browser (its profile is kept)")
 
     def build_details(self):
         group = Adw.PreferencesGroup()
@@ -216,7 +306,7 @@ class Window(Adw.ApplicationWindow):
         self.browser_row.set_subtitle(
             f"Profile: {sso.default_profile(b).replace(os.path.expanduser('~'), '~', 1)}"
             if b
-            else "Install Chromium, Google Chrome, Brave, Microsoft Edge or Vivaldi"
+            else "Install Chromium, Chrome, Brave, Edge or Vivaldi, or download one below"
         )
 
     def read_settings(self):
@@ -321,8 +411,23 @@ class Window(Adw.ApplicationWindow):
         if not browser:
             return
         self.read_settings()
+        profile = sso.default_profile(browser)
+        if page == "store" and sso.is_downloaded(browser) and not getbrowser.web_store_helper_installed(profile):
+            # ungoogled-chromium can't install from the Web Store by itself.
+            def done(url, error):
+                if error is not None:
+                    self.toast(str(error))
+                self.start_profile(browser, profile, page, [url] if url else [])
+                if url:
+                    self.toast("Install “Chromium Web Store” first: it adds the store’s install buttons")
+
+            background(getbrowser.serve_web_store_helper, done)
+            return
+        self.start_profile(browser, profile, page)
+
+    def start_profile(self, browser, profile, page, extra_urls=()):
         try:
-            self.setup_proc = sso.open_profile(browser, sso.default_profile(browser), page)
+            self.setup_proc = sso.open_profile(browser, profile, page, extra_urls)
         except OSError as e:
             self.toast(f"Could not start the browser: {e}")
 

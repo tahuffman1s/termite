@@ -5,7 +5,7 @@ import json
 import sys
 import time
 
-from . import __version__, config, sso, tunnel
+from . import __version__, config, getbrowser, sso, tunnel
 
 
 def log(msg):
@@ -79,7 +79,38 @@ def cmd_browser(args):
     browser = cfg["browser"] or sso.default_browser()
     if not browser:
         raise SystemExit("termite: no Chromium-based browser found")
-    sso.open_profile(browser, sso.default_profile(browser), args.page)
+    profile = sso.default_profile(browser)
+    extra = []
+    if args.page == "store" and sso.is_downloaded(browser) and not getbrowser.web_store_helper_installed(profile):
+        try:
+            extra = [getbrowser.serve_web_store_helper()]
+            log("install “Chromium Web Store” first: it adds the store's install buttons")
+        except getbrowser.DownloadError as e:
+            log(str(e))
+    proc = sso.open_profile(browser, profile, args.page, extra)
+    if extra:
+        proc.wait()  # serving the extension until then
+
+
+def cmd_get_browser(args):
+    if args.remove:
+        getbrowser.remove()
+        log("removed the downloaded browser (its profile is kept)")
+        return
+    last = [-1]
+
+    def progress(fraction):
+        if fraction is None:
+            return
+        pct = int(fraction * 100)
+        if pct // 10 != last[0] // 10:
+            last[0] = pct
+            log(f"{pct}%")
+
+    try:
+        getbrowser.install(progress, log)
+    except getbrowser.DownloadError as e:
+        raise SystemExit(f"termite: {e}")
 
 
 def cmd_info(args):
@@ -93,6 +124,7 @@ def cmd_info(args):
         "networkmanager": tunnel.NetworkManager.available(),
         "networkmanager_openconnect_plugin": tunnel.NetworkManager.plugin_installed(),
         "openconnect": sso.which("openconnect", sbin=True),
+        "downloaded_browser": getbrowser.installed_version(),
     }
     try:
         info["method"] = tunnel.choose(cfg).label
@@ -124,6 +156,8 @@ def main(argv=None):
     b = common(sub.add_parser("browser", help="open the sign-in browser profile, to add extensions or change settings"))
     b.add_argument("page", nargs="?", default="extensions", help="extensions, store, settings or a URL")
     common(sub.add_parser("info", help="what was found on this system"))
+    g = sub.add_parser("get-browser", help=f"download ungoogled-chromium for the sign-in ({getbrowser.SIZE_HINT}), or update it")
+    g.add_argument("--remove", action="store_true", help="remove it instead")
 
     args, rest = p.parse_known_args(argv)
     if args.command in (None, "gui"):
@@ -139,4 +173,5 @@ def main(argv=None):
         "sign-in": cmd_sign_in,
         "browser": cmd_browser,
         "info": cmd_info,
+        "get-browser": cmd_get_browser,
     }[args.command](args)
