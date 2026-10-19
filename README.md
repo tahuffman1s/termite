@@ -107,3 +107,8 @@ python3 -m unittest discover -s tests
 
 To run from the source tree on a system with PyGObject, GTK 4 and libadwaita:
 `python3 -m termite`.
+
+## License
+
+MIT; see [LICENSE](LICENSE). `packaging/excludelist` is from
+[pkg2appimage](https://github.com/AppImageCommunity/pkg2appimage) (MIT).

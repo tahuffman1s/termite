@@ -451,6 +451,7 @@ class App(Adw.Application):
             version=__version__,
             comments="Cisco Secure Client (AnyConnect) VPN with Microsoft sign-in in a Chromium-based browser.",
             website="https://github.com/tahuffman1s/termite",
+            license_type=Gtk.License.MIT_X11,
         )
         if hasattr(Adw, "AboutWindow"):
             Adw.AboutWindow(transient_for=self.window, **kw).present()
@@ -463,6 +464,7 @@ class App(Adw.Application):
                 version=__version__,
                 comments=kw["comments"],
                 website=kw["website"],
+                license_type=kw["license_type"],
             ).present()
 
     def on_quit(self, *_):
