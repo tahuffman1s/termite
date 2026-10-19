@@ -40,6 +40,9 @@ def background(fn, done):
     threading.Thread(target=work, daemon=True).start()
 
 
+ENTRY_WIDTH = 210
+
+
 def entry_row(title, value, placeholder=""):
     """A text row: Adw.EntryRow on libadwaita >= 1.2, else an ActionRow with
     an entry. Returns (row, entry-like widget with get_text/set_text)."""
@@ -47,8 +50,10 @@ def entry_row(title, value, placeholder=""):
         row = Adw.EntryRow(title=title)
         row.set_text(value)
         return row, row
-    row = Adw.ActionRow(title=title)
-    entry = Gtk.Entry(text=value, placeholder_text=placeholder, valign=Gtk.Align.CENTER, hexpand=True)
+    # Titles on one line, entries all the same width at the end of the row,
+    # so they line up.
+    row = Adw.ActionRow(title=title, title_lines=1)
+    entry = Gtk.Entry(text=value, placeholder_text=placeholder, valign=Gtk.Align.CENTER, width_request=ENTRY_WIDTH)
     row.add_suffix(entry)
     row.set_activatable_widget(entry)
     return row, entry
@@ -135,7 +140,8 @@ class Window(Adw.ApplicationWindow):
         keys = [key for key, _ in METHODS]
         self.method_row.set_selected(keys.index(self.cfg["backend"]) if self.cfg["backend"] in keys else 0)
         self.method_row.connect("notify::selected", self.on_method_changed)
-        self.nm_row, self.nm_name = entry_row("NetworkManager connection", self.cfg["connection"], "Termite")
+        self.nm_row, self.nm_name = entry_row("Connection name", self.cfg["connection"], "Termite")
+        self.nm_row.set_tooltip_text("The name of the NetworkManager connection (added if there is none)")
         for row in (self.gateway_row, self.group_row, self.method_row, self.nm_row):
             group.add(row)
         self.on_method_changed()
