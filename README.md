@@ -96,7 +96,9 @@ GTK 4.6 and libadwaita 1.1 from Ubuntu, the libraries they need except those in
 bundle and gives programs Termite starts (browser, nmcli, openconnect) the
 system's own environment back. The GitHub workflow
 `.github/workflows/appimage.yml` builds it on every push and pull request
-and attaches it to a release for `v*` tags (`git tag v1.0.0 && git push --tags`).
+and attaches it to a release for `v*` tags (`git tag v1.0.0 && git push --tags`), or
+when run by hand from the Actions tab with "release" ticked (tagged
+`v<version>` from `termite/__init__.py`).
 
 Tests (a fake gateway, browser, nmcli, pkexec and openconnect; no network or
 root needed):
