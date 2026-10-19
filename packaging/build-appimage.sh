@@ -42,7 +42,7 @@ $SUDO apt-get update -qq
 $SUDO apt-get install -y -qq --no-install-recommends \
   python3 python3-gi python3-cryptography gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
   librsvg2-common libgdk-pixbuf2.0-bin adwaita-icon-theme libglib2.0-bin libgtk-4-bin \
-  libharfbuzz-gobject0 gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info desktop-file-utils ca-certificates curl file >/dev/null
+  libharfbuzz-gobject0 gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info xkb-data desktop-file-utils ca-certificates curl file >/dev/null
 
 ARCH_LIB=/usr/lib/x86_64-linux-gnu
 PY="$(readlink -f /usr/bin/python3)" # python3.10
@@ -140,6 +140,11 @@ gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/hicolor"
 # have it, minimal systems may not.
 mkdir -p "$APPDIR/usr/share/mime"
 cp /usr/share/mime/{mime.cache,globs2,magic,aliases,subclasses,types,treemagic,generic-icons,icons} "$APPDIR/usr/share/mime/" 2>/dev/null || true
+
+# Keyboard layouts (AppRun uses them where the system has none in
+# /usr/share/X11/xkb).
+mkdir -p "$APPDIR/usr/share/X11"
+cp -a /usr/share/X11/xkb "$APPDIR/usr/share/X11/"
 
 # Desktop entry and icon at the top, as AppImages have them.
 mkdir -p "$APPDIR/usr/share/applications"

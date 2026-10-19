@@ -6,7 +6,7 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # The variables this changes, kept for the programs Termite starts (the
 # browser, nmcli, openconnect), which must not load the bundled libraries
 # (termite.sso.host_env puts them back).
-VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE GSK_RENDERER FONTCONFIG_FILE"
+VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GIO_EXTRA_MODULES XKB_CONFIG_ROOT GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE GSK_RENDERER FONTCONFIG_FILE"
 unset_vars=""
 for v in $VARS; do
   if eval "[ \"\${$v+set}\" = set ]"; then
@@ -35,6 +35,8 @@ for f in "$HERE"/usr/lib/fallback/*; do
   done
   ln -sf "$f" "$fallback_dir/$n"
 done
+own_fontconfig=0
+[ -e "$fallback_dir/libfontconfig.so.1" ] && own_fontconfig=1
 
 export LD_LIBRARY_PATH="$HERE/usr/lib:$fallback_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONHOME="$HERE/usr"
@@ -45,6 +47,7 @@ export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"
 # Only the bundled GIO and GTK modules (dconf, for the desktop's settings):
 # the host's are built against its own, newer, GLib and GTK.
 export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
+unset GIO_EXTRA_MODULES
 export GTK_EXE_PREFIX="$HERE/usr"
 export GTK_DATA_PREFIX="$HERE/usr"
 unset GTK_PATH
@@ -54,8 +57,16 @@ export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$HERE/usr/sh
 # the host's GL drivers (and the libraries they need) out of the process.
 export GSK_RENDERER="${GSK_RENDERER:-cairo}"
 
-# Fonts: the system's fontconfig setup, or the usual font directories.
-[ -e /etc/fonts/fonts.conf ] || [ -n "${FONTCONFIG_FILE:-}" ] || export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+# Fonts: the system's fontconfig setup, or the usual font directories when
+# there is none, or it is meant for the system's own (newer) fontconfig
+# while the bundled one runs (NixOS).
+if [ -z "${FONTCONFIG_FILE:-}" ] && { [ ! -e /etc/fonts/fonts.conf ] || [ "$own_fontconfig" = 1 ]; }; then
+  export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+fi
+
+# Keyboard layouts, which GTK needs on Wayland; bundled for systems that
+# keep them elsewhere (NixOS).
+[ -d /usr/share/X11/xkb ] || export XKB_CONFIG_ROOT="$HERE/usr/share/X11/xkb"
 
 # The bundled OpenSSL looks for CA certificates where Debian keeps them; use
 # the host's bundle, wherever its distribution keeps it.
