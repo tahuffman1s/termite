@@ -25,41 +25,38 @@ connection, and the Microsoft sign-in stays in the browser profile.
 
 ## The sign-in browser
 
-The sign-in window uses a **separate profile** of an installed Chromium-based
-browser (Chromium, Google Chrome, Brave, Microsoft Edge or Vivaldi; pick one in
-the window). Nothing is added to it by default. To sign in with a password
-manager or passkey extension (Proton Pass, Bitwarden, 1Password, ...), use
-**Add extensions**, **Manage extensions** or **Browser settings** in the window
-(or `termite browser store|extensions|settings`): they open that profile in a
-normal browser window. Close it again before connecting; a profile can only be
+The sign-in window is **Chromium, built into the AppImage**: Google's
+open-source Chromium build, nothing to install. It has a profile of its own
+(`~/.local/share/termite/chromium-builtin/`) and nothing is added to it by
+default. To sign in with a password manager or passkey extension (Proton
+Pass, Bitwarden, 1Password, ...), use **Add extensions** (the Chrome Web Store),
+**Manage extensions** or **Browser settings** in the window (or
+`termite browser store|extensions|settings`): they open that profile in a
+normal Chromium window. Close it again before connecting; a profile can only be
 open in one window at a time.
 
-Profiles are kept in `~/.local/share/termite/<browser>/` (for a snap browser,
+An installed Chromium-based browser (Chromium, Google Chrome, Brave, Microsoft
+Edge or Vivaldi) can be picked instead, in **Browser**; each gets its own
+profile in `~/.local/share/termite/<browser>/` (for a snap browser,
 `~/snap/<browser>/common/termite/`). Flatpak browsers can't be driven this
-way; use a distribution package or the vendor's own package.
+way.
 
-### No browser? Download ungoogled-chromium
+About the built-in Chromium:
 
-Without a Chromium-based browser installed (or to keep the sign-in out of
-yours), **Download** in the window (or `termite get-browser`) fetches the latest
-portable [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium-portablelinux)
-into `~/.local/share/termite/browser/`: a 160 MB download, about 550 MB on
-disk (its translations other than English and your desktop's language are left
-out). It is used only by Termite; **Update** gets a newer version and the bin
-button removes it. It isn't in the AppImage, so the AppImage stays small for
-everyone who has a browser already.
-
-ungoogled-chromium doesn't talk to the Chrome Web Store by itself. The first
-**Add extensions** with it also offers the
-[Chromium Web Store](https://github.com/NeverDecaf/chromium-web-store)
-extension, which adds the store's install buttons and keeps extensions up to
-date: accept its "Add extension" prompt, then install the others from the store
-as usual.
-
-Its sandbox uses unprivileged user namespaces (the portable build has no
-setuid helper). Where the system turns those off (Ubuntu 24.04's AppArmor
-default), it runs without the sandbox. On NixOS, install `pkgs.ungoogled-chromium`
-with Nix instead; downloaded builds can't find their libraries there.
+- It is the Chromium snapshot (`chromium-browser-snapshots`) at the point
+  the current Stable release branched from, so that milestone's code, picked
+  when the AppImage is built (`packaging/fetch-chromium.py`). It doesn't get
+  the fixes Stable gets after branching until the next Termite build, so keep
+  Termite up to date, or pick an installed browser that your distribution
+  updates.
+- It sandboxes itself with unprivileged user namespaces, as its setuid helper
+  can't work from an AppImage. Where the system doesn't allow those (Ubuntu
+  24.04's AppArmor default, some containers), it runs without the sandbox.
+- It runs natively on Wayland desktops, and on X11 otherwise. The libraries
+  it needs come from the system, or from the AppImage where the system has
+  none (NixOS).
+- `TERMITE_BROWSER_LOG=1` shows the browser's own messages, for when it
+  doesn't start.
 
 ## Install
 
@@ -74,18 +71,18 @@ chmod +x Termite-*-x86_64.AppImage
 It needs glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch,
 openSUSE Tumbleweed, ...) and, on the host:
 
-- a Chromium-based browser;
 - NetworkManager's OpenConnect plugin (`network-manager-openconnect` on
   Debian/Ubuntu, `NetworkManager-openconnect` on Fedora/openSUSE/Arch), **or**
   `openconnect` and polkit's `pkexec`.
 
-Python, GTK, libadwaita and OpenSSL are inside the AppImage; graphics, fonts and
-CA certificates come from the system. Common libraries every desktop has
-(fontconfig, X11, zlib, ...) come from the system too, or from the AppImage
-on systems that keep them elsewhere, like NixOS (where `programs.nix-ld`
-must be on, as for any AppImage run directly, or use `appimage-run`). The AppImage uses the static AppImage
-runtime, so it doesn't need `libfuse2`. Tools like Gear Lever or
-AppImageLauncher add it to the app menu.
+Python, GTK, libadwaita, OpenSSL and Chromium are inside the AppImage (about
+210 MB); graphics, fonts and CA certificates come from the system. Common
+libraries every desktop has (fontconfig, X11, zlib, ...) come from the system
+too, or from the AppImage on systems that keep them elsewhere, like NixOS
+(where `programs.nix-ld` must be on, as for any AppImage run directly, or use
+`appimage-run`). The AppImage uses the static AppImage runtime, so it doesn't
+need `libfuse2`. Tools like Gear Lever or AppImageLauncher add it to the app
+menu.
 
 ## Command line
 
@@ -98,7 +95,6 @@ termite disconnect | status      the NetworkManager connection
 termite browser [store|extensions|settings|URL]
 termite sign-in GATEWAY [GROUP]  only sign in; print the session as JSON
 termite info                     what was found on this system
-termite get-browser [--remove]   download (or update, or remove) ungoogled-chromium
 ```
 
 With openconnect, `connect` stays in the foreground (it uses `sudo` in a

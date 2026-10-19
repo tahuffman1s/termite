@@ -6,7 +6,7 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # The variables this changes, kept for the programs Termite starts (the
 # browser, nmcli, openconnect), which must not load the bundled libraries
 # (termite.sso.host_env puts them back).
-VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GIO_EXTRA_MODULES XKB_CONFIG_ROOT GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE GSK_RENDERER FONTCONFIG_FILE"
+VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GIO_EXTRA_MODULES XKB_CONFIG_ROOT GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE OPENSSL_MODULES OPENSSL_CONF GSK_RENDERER FONTCONFIG_FILE"
 unset_vars=""
 for v in $VARS; do
   if eval "[ \"\${$v+set}\" = set ]"; then
@@ -23,7 +23,7 @@ mkdir -p "$cache_dir" 2>/dev/null
 # The common libraries in usr/lib/fallback, for the ones this system
 # doesn't keep in the usual places (NixOS): links to them in a directory of
 # this run's own, as the AppImage is mounted somewhere new each time.
-for d in "$cache_dir"/lib-*; do
+for d in "$cache_dir"/lib-* "$cache_dir"/chromium-*; do
   [ -d "$d" ] && [ ! -d "$(cat "$d/.from" 2>/dev/null)" ] && rm -rf "$d"
 done
 fallback_dir="$cache_dir/lib-$$"
@@ -37,6 +37,21 @@ for f in "$HERE"/usr/lib/fallback/*; do
 done
 own_fontconfig=0
 [ -e "$fallback_dir/libfontconfig.so.1" ] && own_fontconfig=1
+
+# The same for the bundled Chromium, whose libraries are its own business:
+# a directory of links to the bundled ones the system doesn't have, which
+# Termite puts on its LD_LIBRARY_PATH alone (termite.sso.browser_env).
+chromium_dir="$cache_dir/chromium-$$"
+mkdir -p "$chromium_dir" && printf '%s' "$HERE" >"$chromium_dir/.from"
+for f in "$HERE"/usr/lib/chromium-deps/*.so*; do
+  n="${f##*/}"
+  for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /lib64 /usr/lib /lib; do
+    [ -e "$d/$n" ] && continue 2
+  done
+  ln -sf "$f" "$chromium_dir/$n"
+done
+[ -e "$chromium_dir/libnss3.so" ] && ln -sfn "$HERE/usr/lib/chromium-deps/nss" "$chromium_dir/nss"
+export TERMITE_CHROMIUM="$HERE/usr/lib/chromium/chrome" TERMITE_CHROMIUM_LIBS="$chromium_dir"
 
 export LD_LIBRARY_PATH="$HERE/usr/lib:$fallback_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONHOME="$HERE/usr"
@@ -67,6 +82,10 @@ fi
 # Keyboard layouts, which GTK needs on Wayland; bundled for systems that
 # keep them elsewhere (NixOS).
 [ -d /usr/share/X11/xkb ] || export XKB_CONFIG_ROOT="$HERE/usr/share/X11/xkb"
+
+# The bundled OpenSSL's modules, not the system's (or none), and no
+# configuration of the system's, which is for its own OpenSSL.
+export OPENSSL_MODULES="$HERE/usr/lib/ossl-modules" OPENSSL_CONF=/dev/null
 
 # The bundled OpenSSL looks for CA certificates where Debian keeps them; use
 # the host's bundle, wherever its distribution keeps it.

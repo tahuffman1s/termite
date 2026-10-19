@@ -89,55 +89,80 @@ def data_dir():
     return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "termite")
 
 
-def downloaded_dir():
-    """Where Termite keeps the ungoogled-chromium it downloads (getbrowser)."""
-    return os.path.join(data_dir(), "browser", "ungoogled-chromium")
+def bundled_browser():
+    """The Chromium in the AppImage (AppRun says where), if there is one."""
+    path = os.environ.get("TERMITE_CHROMIUM")
+    return path if path and os.access(path, os.X_OK) else None
 
 
-def downloaded_browser():
-    path = os.path.join(downloaded_dir(), "chrome")
-    return path if os.access(path, os.X_OK) else None
+def is_bundled(browser):
+    return bool(browser) and browser == bundled_browser()
 
 
-def is_downloaded(browser):
-    return bool(browser) and os.path.dirname(os.path.realpath(browser)) == os.path.realpath(downloaded_dir())
+_userns = None
 
 
 def userns_restricted():
-    """Whether unprivileged user namespaces, which Chromium's sandbox needs
-    without its setuid helper, are turned off (Ubuntu 24.04's AppArmor
-    default, or an old Debian switch)."""
-    for path, off in (("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "1"), ("/proc/sys/kernel/unprivileged_userns_clone", "0")):
-        try:
-            with open(path) as f:
-                if f.read().strip() == off:
-                    return True
-        except OSError:
-            pass
-    return False
+    """Whether Chromium can't sandbox itself with unprivileged user
+    namespaces (which it needs without its setuid helper): turned off by
+    AppArmor (Ubuntu 24.04's default) or an old Debian switch, or refused
+    outright (some containers). Checked once, by trying."""
+    global _userns
+    if _userns is None:
+        _userns = False
+        for path, off in (("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "1"), ("/proc/sys/kernel/unprivileged_userns_clone", "0")):
+            try:
+                with open(path) as f:
+                    if f.read().strip() == off:
+                        _userns = True
+            except OSError:
+                pass
+        if not _userns:
+            probe = "import ctypes, sys; sys.exit(ctypes.CDLL(None, use_errno=True).unshare(0x10000000) != 0)"  # CLONE_NEWUSER
+            try:
+                _userns = subprocess.run([sys.executable, "-c", probe], capture_output=True, timeout=10).returncode != 0
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return _userns
 
 
 def browser_args(browser):
-    """Extra switches for the downloaded ungoogled-chromium: installing
-    extensions from outside the Web Store (which ungoogled-chromium doesn't
-    talk to; the Chromium Web Store extension does), and no sandbox where
-    the system doesn't allow the one it can use (it comes without the
-    setuid helper)."""
-    if not is_downloaded(browser):
+    """Extra switches for the bundled Chromium: Wayland when the desktop is
+    (it would use X11), and no sandbox where the system doesn't allow the
+    one it can use from an AppImage (its setuid helper can't work there)."""
+    if not is_bundled(browser):
         return []
-    args = ["--extension-mime-request-handling=always-prompt-for-install"]
-    if userns_restricted():
-        args.append("--no-sandbox")
-    return args
+    return ["--ozone-platform-hint=auto"] + (["--no-sandbox"] if userns_restricted() else [])
+
+
+def browser_log():
+    """Where the browser's own messages go: nowhere, unless
+    TERMITE_BROWSER_LOG is set (then to Termite's stderr)."""
+    return None if os.environ.get("TERMITE_BROWSER_LOG") else subprocess.DEVNULL
+
+
+def browser_env(browser):
+    """The environment to start a browser with: the system's, and for the
+    bundled Chromium the bundled libraries the system lacks (AppRun links
+    them into TERMITE_CHROMIUM_LIBS), with the font and keyboard settings
+    that go with them."""
+    env = host_env()
+    if is_bundled(browser):
+        libs = os.environ.get("TERMITE_CHROMIUM_LIBS", "")
+        env["LD_LIBRARY_PATH"] = ":".join(p for p in (libs, env.get("LD_LIBRARY_PATH", "")) if p)
+        for var in ("FONTCONFIG_FILE", "XKB_CONFIG_ROOT"):
+            if var in os.environ:
+                env[var] = os.environ[var]
+    return env
 
 
 def find_browsers():
-    """The Chromium-based browsers here, as [(name, path)]: the downloaded
-    ungoogled-chromium first, if there is one, then the installed ones."""
+    """The Chromium-based browsers here, as [(name, path)]: the AppImage's
+    own Chromium first, if there is one, then the installed ones."""
     found, seen = [], set()
-    if downloaded_browser():
-        found.append(("ungoogled-chromium (downloaded)", downloaded_browser()))
-        seen.add(os.path.realpath(downloaded_browser()))
+    if bundled_browser():
+        found.append(("Chromium (built in)", bundled_browser()))
+        seen.add(os.path.realpath(bundled_browser()))
     for name, cmds in BROWSERS:
         for cmd in cmds:
             path = which(cmd)
@@ -161,8 +186,9 @@ def default_profile(browser):
     ~/.local/share/termite/chromium."""
     if os.environ.get("TERMITE_PROFILE"):
         return os.environ["TERMITE_PROFILE"]
-    if is_downloaded(browser):
-        return os.path.join(data_dir(), "ungoogled-chromium")
+    if is_bundled(browser):
+        # Its own, apart from an installed Chromium's (of another version).
+        return os.path.join(data_dir(), "chromium-builtin")
     base = os.path.basename(browser or "chromium")
     kind = re.sub(r"-(stable|browser|beta|dev|unstable)$", "", base) or "chromium"
     if browser and (browser.startswith("/snap/") or os.path.realpath(browser).startswith("/snap/")):
@@ -181,18 +207,17 @@ SETUP_PAGES = {
 }
 
 
-def open_profile(browser, profile, page="extensions", extra_urls=()):
+def open_profile(browser, profile, page="extensions"):
     """The sign-in profile in a normal browser window; returns the process.
     It has to be closed before signing in, since one profile can only be
     open in one browser process."""
     os.makedirs(profile, exist_ok=True)
-    urls = [*extra_urls, SETUP_PAGES.get(page, page)]
     return subprocess.Popen(
-        [browser, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", *browser_args(browser), *urls],
+        [browser, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", *browser_args(browser), SETUP_PAGES.get(page, page)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=host_env(),
+        stderr=browser_log(),
+        env=browser_env(browser),
         start_new_session=True,
     )
 
@@ -370,8 +395,8 @@ class Chromium:
             pass_fds=(3, 4),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=host_env(),
+            stderr=browser_log(),
+            env=browser_env(browser),
         )
         os.close(hi_r)
         os.close(hi_w)

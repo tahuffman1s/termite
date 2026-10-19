@@ -2,14 +2,16 @@
 # Builds Termite-<version>-x86_64.AppImage: Python, PyGObject, GTK 4 and
 # libadwaita from Ubuntu 22.04, so it runs on distributions with glibc 2.35
 # or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch, openSUSE
-# Tumbleweed, ...). Graphics, fonts and the like come from the host (see
-# excludelist).
+# Tumbleweed, ...), and the open-source Chromium build for the sign-in
+# (packaging/fetch-chromium.py). Graphics, fonts and the like come from the
+# host (see excludelist).
 #
 # Usage: packaging/build-appimage.sh [OUT_DIR]   (default: dist/)
 # Runs itself in an ubuntu:22.04 container (docker or podman) unless
 # TERMITE_BUILD_HERE=1, which CI sets on an Ubuntu 22.04 runner.
-# APPIMAGETOOL and APPIMAGE_RUNTIME: already downloaded appimagetool and
-# AppImage runtime files, instead of fetching them from GitHub.
+# APPIMAGETOOL, APPIMAGE_RUNTIME and CHROMIUM_ZIP: already downloaded
+# appimagetool, AppImage runtime and Chromium (chrome-linux.zip) files,
+# instead of fetching them.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,6 +30,8 @@ if [ "${TERMITE_BUILD_HERE:-0}" != 1 ]; then
   mounts=(-v "$SRC:/src:ro" -v "$OUT:/out")
   [ -z "${APPIMAGETOOL:-}" ] || mounts+=(-v "$(readlink -f "$APPIMAGETOOL"):/tools/appimagetool:ro" -e APPIMAGETOOL=/tools/appimagetool)
   [ -z "${APPIMAGE_RUNTIME:-}" ] || mounts+=(-v "$(readlink -f "$APPIMAGE_RUNTIME"):/tools/runtime:ro" -e APPIMAGE_RUNTIME=/tools/runtime)
+  [ -z "${CHROMIUM_ZIP:-}" ] || mounts+=(-v "$(readlink -f "$CHROMIUM_ZIP"):/tools/chrome-linux.zip:ro" -e CHROMIUM_ZIP=/tools/chrome-linux.zip)
+  [ -z "${CHROMIUM_POSITION:-}" ] || mounts+=(-e CHROMIUM_POSITION="$CHROMIUM_POSITION")
   exec "$engine" run --rm -e TERMITE_BUILD_HERE=1 -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "${mounts[@]}" ubuntu:22.04 /src/packaging/build-appimage.sh /out
 fi
@@ -42,7 +46,9 @@ $SUDO apt-get update -qq
 $SUDO apt-get install -y -qq --no-install-recommends \
   python3 python3-gi python3-cryptography gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
   librsvg2-common libgdk-pixbuf2.0-bin adwaita-icon-theme libglib2.0-bin libgtk-4-bin \
-  libharfbuzz-gobject0 gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info xkb-data desktop-file-utils ca-certificates curl file >/dev/null
+  libharfbuzz-gobject0 gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info xkb-data desktop-file-utils ca-certificates curl file \
+  unzip binutils libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 libxkbcommon0 \
+  libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxext6 libxshmfence1 libasound2 libpango-1.0-0 libcairo2 libdbus-1-3 >/dev/null
 
 ARCH_LIB=/usr/lib/x86_64-linux-gnu
 PY="$(readlink -f /usr/bin/python3)" # python3.10
@@ -67,6 +73,10 @@ cp -a /usr/lib/python3/dist-packages/{gi,cryptography,_cffi_backend.cpython-*.so
 cp -a "$SRC/termite" "$DIST/"
 printf 'from termite.cli import main\n\nmain()\n' >"$APPDIR/usr/bin/termite"
 find "$DIST/termite" -name __pycache__ -prune -exec rm -rf {} +
+
+# OpenSSL's provider modules: Ubuntu's cryptography loads the legacy one,
+# from where Ubuntu keeps it (AppRun points OPENSSL_MODULES at these).
+cp -a "$ARCH_LIB/ossl-modules" "$LIB/"
 
 # Typelibs, and what loads them; the image loaders.
 mkdir -p "$LIB/girepository-1.0" "$LIB/gdk-pixbuf-2.0/loaders" "$LIB/gio/modules"
@@ -93,7 +103,7 @@ roots=(
   "$APPDIR/usr/bin/python3" "$APPDIR/usr/bin/gdk-pixbuf-query-loaders"
   "$LIB/python$PYVER"/lib-dynload/*.so "$DIST"/gi/*.so "$DIST"/_cffi_backend*.so
   $(find "$DIST/cryptography" -name '*.so')
-  "$LIB"/gdk-pixbuf-2.0/loaders/*.so "$LIB"/gio/modules/*.so
+  "$LIB"/gdk-pixbuf-2.0/loaders/*.so "$LIB"/gio/modules/*.so "$LIB"/ossl-modules/*.so
 )
 for so in libgtk-4.so.1 libadwaita-1.so.0 libgirepository-1.0.so.1 libgraphene-1.0.so.0 libcairo-gobject.so.2 \
   libpangocairo-1.0.so.0 libpangoft2-1.0.so.0 libharfbuzz-gobject.so.0 libgdk_pixbuf-2.0.so.0 librsvg-2.so.2; do
@@ -119,6 +129,46 @@ while [ "${#queue[@]}" -gt 0 ]; do
     queue+=("$LIB/$name")
   done < <(ldd "$f" 2>/dev/null | sed -n 's/^\s*\(\S*\) => \(\S*\) .*/\1 \2/p')
 done
+
+# Chromium for the sign-in, with its own copies of the libraries it needs
+# (usr/lib/chromium-deps), which AppRun hands it only for the ones the
+# system doesn't have (NixOS: none of them), like usr/lib/fallback. Its
+# setuid sandbox helper can't work from an AppImage: it sandboxes itself
+# with user namespaces instead (sso.browser_args).
+CHROME="$LIB/chromium"
+zip="${CHROMIUM_ZIP:-}"
+if [ -z "$zip" ]; then
+  zip="$WORK/chrome-linux.zip"
+  echo "build-appimage: Chromium snapshot (position, stable version): $(python3 "$SRC/packaging/fetch-chromium.py" "$zip")"
+fi
+unzip -q "$zip" -d "$WORK/chromium"
+mv "$WORK/chromium/chrome-linux" "$CHROME"
+rm -f "$CHROME/chrome_sandbox" "$CHROME/chrome-wrapper" "$CHROME"/locales/*.info
+strip "$CHROME/chrome" "$CHROME/chrome_crashpad_handler" "$CHROME"/*.so* 2>/dev/null || true
+echo "build-appimage: $("$CHROME/chrome" --version)"
+DEPS="$LIB/chromium-deps"
+mkdir -p "$DEPS/nss"
+# NSS loads these itself, from an nss/ directory beside libnss3.
+cp -L "$ARCH_LIB"/nss/*.so "$DEPS/nss/"
+glibc="ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1"
+gl="libGL.so.1 libEGL.so.1 libGLX.so.0 libGLdispatch.so.0 libOpenGL.so.0"
+declare -A cseen
+cqueue=("$CHROME/chrome" "$CHROME"/*.so* "$DEPS"/nss/*.so)
+while [ "${#cqueue[@]}" -gt 0 ]; do
+  f="${cqueue[0]}"
+  cqueue=("${cqueue[@]:1}")
+  while read -r name path; do
+    [ -n "$path" ] && [ -f "$path" ] || continue
+    [ -z "${cseen[$name]:-}" ] || continue
+    cseen[$name]=1
+    case " $glibc $gl " in *" $name "*) continue ;; esac
+    [ -f "$CHROME/$name" ] && continue # its own (libEGL.so and the like)
+    cp -L "$path" "$DEPS/$name"
+    cqueue+=("$DEPS/$name")
+  done < <(LD_LIBRARY_PATH="$CHROME" ldd "$f" 2>/dev/null | sed -n 's/^\s*\(\S*\) => \(\S*\) .*/\1 \2/p')
+done
+missing="$(LD_LIBRARY_PATH="$DEPS:$CHROME" ldd "$CHROME/chrome" | grep 'not found' || true)"
+[ -z "$missing" ] || { echo "build-appimage: Chromium needs libraries that aren't installed: $missing" >&2; exit 1; }
 
 # The settings schemas GTK and libadwaita read: their own and GNOME's
 # desktop ones (fonts, style, ...).

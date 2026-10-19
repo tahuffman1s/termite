@@ -18,7 +18,7 @@ SRC = os.path.dirname(HERE)
 FAKES = os.path.join(HERE, "fakes")
 sys.path.insert(0, SRC)
 
-from termite import config, getbrowser, sso, tunnel  # noqa: E402
+from termite import config, sso, tunnel  # noqa: E402
 
 TOKEN = "saml-token-123"
 SESSION = "session-456"
@@ -85,7 +85,7 @@ class Base(unittest.TestCase):
         }
         self.saved = dict(os.environ)
         os.environ.update(self.env)
-        for var in ("TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL"):
+        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL"):
             os.environ.pop(var, None)
 
     def tearDown(self):
@@ -256,114 +256,51 @@ class OpenConnectTunnel(Base):
         self.assertFalse(t.is_up())
 
 
-class FakeReleases(http.server.BaseHTTPRequestHandler):
-    """The GitHub API's latest release and its tarball, ungoogled-chromium style."""
+class Bundled(Base):
+    """The AppImage's Chromium, as AppRun announces it."""
 
-    tarball = b""
-    api = True
-
-    def log_message(self, *args):
-        pass
-
-    def do_GET(self):
-        port = self.server.server_address[1]
-        if self.path == "/api" and FakeReleases.api:
-            body = json.dumps({"tag_name": "150.0.1-1", "assets": [
-                {"name": "ungoogled-chromium-150.0.1-1-x86_64.AppImage", "browser_download_url": "http://x/nope"},
-                {"name": "ungoogled-chromium-150.0.1-1-x86_64_linux.tar.xz", "browser_download_url": f"http://127.0.0.1:{port}/dl/u.tar.xz"},
-            ]}).encode()  # fmt: skip
-        elif self.path == "/latest":
-            self.send_response(302)
-            self.send_header("Location", f"http://127.0.0.1:{port}/releases/tag/151.0.2-1")
-            self.end_headers()
-            return
-        elif self.path.startswith("/releases/tag/"):
-            body = b"release page"
-        elif self.path in ("/dl/u.tar.xz", "/download/151.0.2-1/ungoogled-chromium-151.0.2-1-x86_64_linux.tar.xz"):
-            body = FakeReleases.tarball
-        else:
-            self.send_response(404)
-            self.end_headers()
-            return
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-
-class GetBrowser(Base):
     def setUp(self):
         super().setUp()
-        import io
-        import tarfile
+        self.chrome = os.path.join(FAKES, "chromium")
+        os.environ.update(
+            TERMITE_CHROMIUM=self.chrome,
+            TERMITE_CHROMIUM_LIBS="/appimage/run/chromium-libs",
+            TERMITE_HOST_VARS="LD_LIBRARY_PATH FONTCONFIG_FILE",
+            TERMITE_HOST_UNSET=" FONTCONFIG_FILE",
+            TERMITE_HOST_LD_LIBRARY_PATH="/host/lib",
+            LD_LIBRARY_PATH="/appimage/usr/lib",
+            FONTCONFIG_FILE="/appimage/etc/fonts/fonts.conf",
+        )
 
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:xz") as tar:
-            info = tarfile.TarInfo("ungoogled-chromium-150.0.1-1-x86_64_linux/chrome")
-            data = read(os.path.join(FAKES, "chromium")).encode()
-            info.size, info.mode = len(data), 0o755
-            tar.addfile(info, io.BytesIO(data))
-        FakeReleases.tarball = buf.getvalue()
-        FakeReleases.api = True
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeReleases)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        self.urls = (getbrowser.API, getbrowser.LATEST, getbrowser.DOWNLOAD)
-        getbrowser.API, getbrowser.LATEST, getbrowser.DOWNLOAD = f"{base}/api", f"{base}/latest", f"{base}/download"
-        self.unsupported = getbrowser.unsupported
-        getbrowser.unsupported = lambda: None
+    def test_first_with_its_own_profile(self):
+        self.assertEqual(sso.find_browsers()[0], ("Chromium (built in)", self.chrome))
+        self.assertEqual(len([p for _, p in sso.find_browsers() if p == self.chrome]), 1)
+        self.assertEqual(sso.default_profile(self.chrome), os.path.join(self.tmp, "data", "termite", "chromium-builtin"))
 
-    def tearDown(self):
-        getbrowser.API, getbrowser.LATEST, getbrowser.DOWNLOAD = self.urls
-        getbrowser.unsupported = self.unsupported
-        self.server.shutdown()
-        self.server.server_close()
-        super().tearDown()
+    def test_env(self):
+        env = sso.browser_env(self.chrome)
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/appimage/run/chromium-libs:/host/lib")
+        self.assertEqual(env["FONTCONFIG_FILE"], "/appimage/etc/fonts/fonts.conf")
+        # Any other browser gets the system's environment back.
+        other = sso.browser_env("/usr/bin/google-chrome")
+        self.assertEqual(other["LD_LIBRARY_PATH"], "/host/lib")
+        self.assertNotIn("FONTCONFIG_FILE", other)
 
-    def test_install_and_use(self):
-        seen = []
-        self.assertEqual(getbrowser.install(progress=seen.append), "150.0.1-1")
-        self.assertEqual(seen[-2], 1.0)  # then None: unpacking
-        chrome = sso.downloaded_browser()
-        self.assertEqual(chrome, os.path.join(self.tmp, "data", "termite", "browser", "ungoogled-chromium", "chrome"))
-        self.assertEqual(getbrowser.installed_version(), "150.0.1-1")
-        # It comes first, has a profile of its own and may install
-        # extensions from outside the store.
-        self.assertEqual(sso.find_browsers()[0], ("ungoogled-chromium (downloaded)", chrome))
-        self.assertEqual(sso.default_profile(chrome), os.path.join(self.tmp, "data", "termite", "ungoogled-chromium"))
-        self.assertIn("--extension-mime-request-handling=always-prompt-for-install", sso.browser_args(chrome))
-        self.assertEqual(sso.browser_args(os.path.join(FAKES, "chromium")), [])
-        sso.open_profile(chrome, sso.default_profile(chrome), "store", ["http://127.0.0.1:1/x.crx"]).wait(10)
-        args = json.loads(read(self.env["FAKE_BROWSER_LOG"]).splitlines()[0])
-        self.assertEqual(args[-2:], ["http://127.0.0.1:1/x.crx", sso.SETUP_PAGES["store"]])
-        getbrowser.remove()
-        self.assertIsNone(sso.downloaded_browser())
-
-    def test_latest_without_api(self):
-        FakeReleases.api = False
-        self.assertEqual(getbrowser.install(), "151.0.2-1")
-
-    def test_update_keeps_old_on_failure(self):
-        getbrowser.install()
-        FakeReleases.tarball = b"not an archive"
-        with self.assertRaises(getbrowser.DownloadError):
-            getbrowser.install()
-        self.assertEqual(getbrowser.installed_version(), "150.0.1-1")
-        self.assertFalse([d for d in os.listdir(os.path.dirname(sso.downloaded_dir())) if d.startswith(".download-")])
-
-    def test_web_store_helper_served_as_extension(self):
-        crx = os.path.join(self.tmp, "helper.crx")
-        with open(crx, "wb") as f:
-            f.write(b"Cr24 fake")
-        old, getbrowser.WEB_STORE_HELPER = getbrowser.WEB_STORE_HELPER, "file://" + crx
+    def test_sandbox(self):
+        restricted = sso.userns_restricted
         try:
-            import urllib.request
-
-            with urllib.request.urlopen(getbrowser.serve_web_store_helper()) as r:
-                self.assertEqual(r.headers["Content-Type"], "application/x-chrome-extension")
-                self.assertEqual(r.read(), b"Cr24 fake")
+            sso.userns_restricted = lambda: True
+            self.assertEqual(sso.browser_args(self.chrome), ["--ozone-platform-hint=auto", "--no-sandbox"])
+            self.assertEqual(sso.browser_args("/usr/bin/chromium"), [])
+            sso.userns_restricted = lambda: False
+            self.assertEqual(sso.browser_args(self.chrome), ["--ozone-platform-hint=auto"])
         finally:
-            getbrowser.WEB_STORE_HELPER = old
+            sso.userns_restricted = restricted
+
+    def test_launched_with_it(self):
+        sso.open_profile(self.chrome, sso.default_profile(self.chrome), "store").wait(10)
+        args = json.loads(read(self.env["FAKE_BROWSER_LOG"]).splitlines()[0])
+        self.assertIn(f"--user-data-dir={os.path.join(self.tmp, 'data', 'termite', 'chromium-builtin')}", args)
 
 
 class Config(Base):
