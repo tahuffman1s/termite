@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="termite/data/io.github.tahuffman1s.Termite.svg" width="128" alt="Termite">
+  <img src="termite/data/icons/hicolor/scalable/apps/io.github.tahuffman1s.Termite.svg" width="128" alt="Termite">
 </p>
 
 <h1 align="center">Termite</h1>
@@ -33,6 +33,8 @@ brings up the tunnel.
   VPN shows in your network menu
 - 🐜 **Tray icon**: see at a glance whether you're connected; connect and
   disconnect from the menu
+- 🎨 **A proper GNOME app**: current GTK 4 and libadwaita, light and dark,
+  adaptive down to phone size
 - 🐧 **Any distribution**: Ubuntu, Debian, Fedora, Arch, openSUSE, NixOS…
   (glibc 2.35 or newer)
 - 🔒 **Nothing secret stored**: the VPN session ends with the connection
@@ -53,9 +55,10 @@ and sign in with Microsoft in the window that opens. That's it.
 ## Extensions
 
 The sign-in browser starts clean. To sign in with a password manager or
-passkey extension (Proton Pass, Bitwarden, 1Password…), add it from the Chrome
-Web Store with **Add extensions**. You can also use an installed Chrome, Brave,
-Edge or Vivaldi instead of the built-in Chromium.
+passkey extension (Proton Pass, Bitwarden, 1Password…), open
+**Preferences → Browser → Add Extensions** and install it from the Chrome Web
+Store. You can also pick an installed Chrome, Brave, Edge or Vivaldi there
+instead of the built-in Chromium.
 
 <p align="center">
   <img src="docs/extensions.png" alt="The sign-in browser settings" width="820">
@@ -91,6 +94,8 @@ Settings live in `~/.config/termite/config.json`.
   branch point, refreshed with each Termite release.
 - Closing the window keeps Termite in the tray. Quit from the tray, or with
   Ctrl+Q.
+- **Connection Log** in the menu shows what happened; About → Troubleshooting
+  has the details worth sending with a bug report.
 - `TERMITE_BROWSER_LOG=1` shows the browser's own messages if it won't start.
 </details>
 
@@ -102,15 +107,19 @@ packaging/build-appimage.sh     # → dist/Termite-<version>-x86_64.AppImage
 python3 -m unittest discover -s tests
 ```
 
-The build runs in an `ubuntu:22.04` container (Docker or Podman). It bundles
-Python, GTK 4 and libadwaita from Ubuntu, Chromium, and OpenConnect built from
-source. Behind a TLS-inspecting proxy, set `BUILD_CA_CERT=<ca file>`. GitHub
-Actions builds every push. Run the workflow with **release** ticked to publish.
+The build runs in an `ubuntu:22.04` container (Docker or Podman), so the
+AppImage needs only glibc 2.35. On that base it builds current GTK 4 (4.22) and
+libadwaita (1.9) with what they need (`packaging/build-gnome.sh`, about half an
+hour the first time; `TERMITE_GNOME_PREFIX=<dir>` keeps it), OpenConnect from
+source, and adds Chromium. Behind a TLS-inspecting proxy, set
+`BUILD_CA_CERT=<ca file>`. GitHub Actions builds every push (keeping the GNOME
+build in its cache). Run the workflow with **release** ticked to publish.
 </details>
 
 ## License
 
 Termite is [MIT](LICENSE). The AppImage also carries Chromium (BSD),
-OpenConnect (LGPL-2.1, source included), vpnc-script (GPL-2.0) and libraries
-from Ubuntu. Their licenses and sources are listed in the AppImage under
+OpenConnect (LGPL-2.1, source included), vpnc-script (GPL-2.0), GTK, libadwaita
+and the libraries they need (LGPL and similar, built from their release
+tarballs), and libraries from Ubuntu. Their licenses and sources are listed in the AppImage under
 `usr/share/licenses/`.

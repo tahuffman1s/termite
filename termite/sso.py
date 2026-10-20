@@ -150,7 +150,7 @@ def browser_env(browser):
     if is_bundled(browser):
         libs = os.environ.get("TERMITE_CHROMIUM_LIBS", "")
         env["LD_LIBRARY_PATH"] = ":".join(p for p in (libs, env.get("LD_LIBRARY_PATH", "")) if p)
-        for var in ("FONTCONFIG_FILE", "XKB_CONFIG_ROOT"):
+        for var in ("FONTCONFIG_FILE", "FONTCONFIG_PATH", "XKB_CONFIG_ROOT"):
             if var in os.environ:
                 env[var] = os.environ[var]
     return env

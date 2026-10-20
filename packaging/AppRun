@@ -6,7 +6,7 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # The variables this changes, kept for the programs Termite starts (the
 # browser, nmcli, openconnect), which must not load the bundled libraries
 # (termite.sso.host_env puts them back).
-VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GIO_EXTRA_MODULES XKB_CONFIG_ROOT GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE OPENSSL_MODULES OPENSSL_CONF GSK_RENDERER FONTCONFIG_FILE"
+VARS="LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONNOUSERSITE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GIO_EXTRA_MODULES XKB_CONFIG_ROOT GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX GTK_DATA_PREFIX GTK_PATH XDG_DATA_DIRS SSL_CERT_FILE OPENSSL_MODULES OPENSSL_CONF GSK_RENDERER FONTCONFIG_FILE FONTCONFIG_PATH"
 unset_vars=""
 for v in $VARS; do
   if eval "[ \"\${$v+set}\" = set ]"; then
@@ -35,8 +35,6 @@ for f in "$HERE"/usr/lib/fallback/*; do
   done
   ln -sf "$f" "$fallback_dir/$n"
 done
-own_fontconfig=0
-[ -e "$fallback_dir/libfontconfig.so.1" ] && own_fontconfig=1
 
 # The same for the bundled Chromium, whose libraries are its own business:
 # a directory of links to the bundled ones the system doesn't have, which
@@ -74,11 +72,15 @@ export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$HERE/usr/sh
 # the host's GL drivers (and the libraries they need) out of the process.
 export GSK_RENDERER="${GSK_RENDERER:-cairo}"
 
-# Fonts: the system's fontconfig setup, or the usual font directories when
-# there is none, or it is meant for the system's own (newer) fontconfig
-# while the bundled one runs (NixOS).
-if [ -z "${FONTCONFIG_FILE:-}" ] && { [ ! -e /etc/fonts/fonts.conf ] || [ "$own_fontconfig" = 1 ]; }; then
-  export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+# Fonts: the bundled fontconfig (Pango needs a newer one than many systems
+# have) with the system's setup in /etc/fonts, or the usual font
+# directories where there is none.
+if [ -z "${FONTCONFIG_FILE:-}" ] && [ -z "${FONTCONFIG_PATH:-}" ]; then
+  if [ -e /etc/fonts/fonts.conf ]; then
+    export FONTCONFIG_PATH=/etc/fonts
+  else
+    export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+  fi
 fi
 
 # Keyboard layouts, which GTK needs on Wayland; bundled for systems that

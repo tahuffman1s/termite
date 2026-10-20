@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Builds Termite-<version>-x86_64.AppImage: Python, PyGObject, GTK 4 and
-# libadwaita from Ubuntu 22.04, so it runs on distributions with glibc 2.35
-# or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch, openSUSE
-# Tumbleweed, ...), and the open-source Chromium build for the sign-in
+# Builds Termite-<version>-x86_64.AppImage: Python from Ubuntu 22.04, so it
+# runs on distributions with glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+,
+# Fedora 36+, Arch, openSUSE Tumbleweed, ...), current GTK 4, libadwaita and
+# PyGObject built on it (packaging/build-gnome.sh; TERMITE_GNOME_PREFIX
+# keeps that build between runs), and the open-source Chromium build for the sign-in
 # (packaging/fetch-chromium.py), and OpenConnect built from source with
 # vpnc-script, for connecting without NetworkManager's plugin. Graphics,
 # fonts and the like come from the host (see excludelist). License texts
@@ -42,6 +43,7 @@ if [ "${TERMITE_BUILD_HERE:-0}" != 1 ]; then
   [ -z "${CHROMIUM_ZIP:-}" ] || mounts+=(-v "$(readlink -f "$CHROMIUM_ZIP"):/tools/chrome-linux.zip:ro" -e CHROMIUM_ZIP=/tools/chrome-linux.zip)
   [ -z "${CHROMIUM_POSITION:-}" ] || mounts+=(-e CHROMIUM_POSITION="$CHROMIUM_POSITION")
   [ -z "${BUILD_CA_CERT:-}" ] || mounts+=(-v "$(readlink -f "$BUILD_CA_CERT"):/tools/ca.crt:ro" -e BUILD_CA_CERT=/tools/ca.crt)
+  [ -z "${TERMITE_GNOME_PREFIX:-}" ] || mounts+=(-v "$(readlink -f "$TERMITE_GNOME_PREFIX"):/opt/termite-gnome")
   exec "$engine" run --rm -e TERMITE_BUILD_HERE=1 -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "${mounts[@]}" ubuntu:22.04 /src/packaging/build-appimage.sh /out
 fi
@@ -58,12 +60,25 @@ SUDO=""
 export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update -qq
 $SUDO apt-get install -y -qq --no-install-recommends \
-  python3 python3-gi python3-cryptography gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
-  librsvg2-common libgdk-pixbuf2.0-bin adwaita-icon-theme libglib2.0-bin libgtk-4-bin \
-  libharfbuzz-gobject0 gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info xkb-data desktop-file-utils ca-certificates curl file \
+  python3 python3-cryptography gir1.2-gdkpixbuf-2.0 gir1.2-graphene-1.0 \
+  librsvg2-common libgdk-pixbuf2.0-bin adwaita-icon-theme \
+  gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info xkb-data desktop-file-utils ca-certificates curl file \
   unzip binutils libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 libxkbcommon0 \
   libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxext6 libxshmfence1 libasound2 libpango-1.0-0 libcairo2 libdbus-1-3 \
-  build-essential pkg-config libssl-dev libxml2-dev zlib1g-dev liblz4-dev patchelf >/dev/null
+  build-essential pkg-config libssl-dev libxml2-dev zlib1g-dev liblz4-dev patchelf \
+  ninja-build cmake python3-pip python3-dev python3-setuptools bison flex gperf gettext itstool xz-utils \
+  libffi-dev libpcre2-dev libmount-dev libexpat1-dev libfreetype-dev libpng-dev libjpeg-dev libtiff-dev \
+  libxkbcommon-dev libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxdamage-dev libxinerama-dev \
+  libxfixes-dev libxrender-dev libxcb1-dev libxcb-render0-dev libxcb-shm0-dev libepoxy-dev libgraphene-1.0-dev \
+  libgdk-pixbuf-2.0-dev libpixman-1-dev libfribidi-dev libcurl4-openssl-dev sassc libxml2-utils libbz2-dev \
+  libbrotli-dev libdrm-dev >/dev/null
+$SUDO pip3 install -q meson==1.9.1
+
+# GTK, libadwaita and the rest, current (Ubuntu 22.04's are 4.6 and 1.1).
+GNOME="${TERMITE_GNOME_PREFIX:-/opt/termite-gnome}"
+$SUDO mkdir -p "$GNOME"
+$SUDO chown "$(id -u):$(id -g)" "$GNOME"
+"$SRC/packaging/build-gnome.sh" "$GNOME"
 
 ARCH_LIB=/usr/lib/x86_64-linux-gnu
 PY="$(readlink -f /usr/bin/python3)" # python3.10
@@ -77,14 +92,15 @@ mkdir -p "$APPDIR/usr/bin" "$LIB" "$APPDIR/usr/share"
 echo "build-appimage: Termite $VERSION, Python $PYVER"
 
 # Python: the interpreter, its standard library (less what a GUI app
-# doesn't use) and the two packages from Ubuntu.
+# doesn't use), PyGObject from the GNOME build and cryptography from Ubuntu.
 cp "$PY" "$APPDIR/usr/bin/python3"
 cp -a "/usr/lib/python$PYVER" "$LIB/"
 rm -rf "$LIB/python$PYVER"/{test,idlelib,tkinter,turtledemo,ensurepip,lib2to3,distutils,pydoc_data,config-*,site-packages,dist-packages}
 find "$LIB/python$PYVER" -name __pycache__ -prune -exec rm -rf {} +
 DIST="$LIB/python3/dist-packages"
 mkdir -p "$DIST"
-cp -a /usr/lib/python3/dist-packages/{gi,cryptography,_cffi_backend.cpython-*.so} "$DIST/"
+cp -a /usr/lib/python3/dist-packages/{cryptography,_cffi_backend.cpython-*.so} "$DIST/"
+cp -a "$GNOME/lib/python3/dist-packages/gi" "$DIST/"
 cp -a "$SRC/termite" "$DIST/"
 printf 'from termite.cli import main\n\nmain()\n' >"$APPDIR/usr/bin/termite"
 find "$DIST/termite" -name __pycache__ -prune -exec rm -rf {} +
@@ -96,6 +112,7 @@ cp -a "$ARCH_LIB/ossl-modules" "$LIB/"
 # Typelibs, and what loads them; the image loaders.
 mkdir -p "$LIB/girepository-1.0" "$LIB/gdk-pixbuf-2.0/loaders" "$LIB/gio/modules"
 cp "$ARCH_LIB"/girepository-1.0/*.typelib "$LIB/girepository-1.0/"
+cp "$GNOME"/lib/girepository-1.0/*.typelib "$LIB/girepository-1.0/" # the newer ones win
 cp "$ARCH_LIB"/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-{svg,png,jpeg,gif}.so "$LIB/gdk-pixbuf-2.0/loaders/" 2>/dev/null || true
 cp "$ARCH_LIB/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders" "$APPDIR/usr/bin/"
 # GSettings through dconf, so GTK sees the desktop's settings (fonts, dark
@@ -120,8 +137,16 @@ roots=(
   $(find "$DIST/cryptography" -name '*.so')
   "$LIB"/gdk-pixbuf-2.0/loaders/*.so "$LIB"/gio/modules/*.so "$LIB"/ossl-modules/*.so
 )
-for so in libgtk-4.so.1 libadwaita-1.so.0 libgirepository-1.0.so.1 libgraphene-1.0.so.0 libcairo-gobject.so.2 \
-  libpangocairo-1.0.so.0 libpangoft2-1.0.so.0 libharfbuzz-gobject.so.0 libgdk_pixbuf-2.0.so.0 librsvg-2.so.2; do
+# The GNOME build's libraries, by soname. These are always the ones used,
+# fontconfig and HarfBuzz included (Pango needs newer ones than most
+# systems have).
+for f in "$GNOME"/lib/lib*.so*; do
+  soname="$(objdump -p "$(readlink -f "$f")" 2>/dev/null | awk '/SONAME/ {print $2}')"
+  [ -n "$soname" ] && [ ! -f "$LIB/$soname" ] || continue
+  cp -L "$f" "$LIB/$soname"
+  roots+=("$LIB/$soname")
+done
+for so in libgraphene-1.0.so.0 libgdk_pixbuf-2.0.so.0 librsvg-2.so.2; do
   cp -L "$ARCH_LIB/$so" "$LIB/"
   roots+=("$LIB/$so")
 done
@@ -134,6 +159,7 @@ while [ "${#queue[@]}" -gt 0 ]; do
     [ -n "$path" ] && [ -f "$path" ] || continue
     [ -z "${seen[$name]:-}" ] || continue
     seen[$name]=1
+    [ -f "$LIB/$name" ] && continue # bundled already (the GNOME build's)
     if tr ' ' '\n' <<<"$fallback" | grep -Fxq "$name"; then
       cp -L "$path" "$LIB/fallback/$name"
       queue+=("$LIB/fallback/$name")
@@ -142,7 +168,7 @@ while [ "${#queue[@]}" -gt 0 ]; do
     grep -Fxq "$name" <<<"$excluded" && continue
     [ -f "$LIB/$name" ] || cp -L "$path" "$LIB/$name"
     queue+=("$LIB/$name")
-  done < <(ldd "$f" 2>/dev/null | sed -n 's/^\s*\(\S*\) => \(\S*\) .*/\1 \2/p')
+  done < <(LD_LIBRARY_PATH="$GNOME/lib" ldd "$f" 2>/dev/null | sed -n 's/^\s*\(\S*\) => \(\S*\) .*/\1 \2/p')
 done
 
 # Chromium for the sign-in, with its own copies of the libraries it needs
@@ -234,18 +260,18 @@ echo "build-appimage: $("$OC/openconnect" --version | head -1)"
 # The settings schemas GTK and libadwaita read: their own and GNOME's
 # desktop ones (fonts, style, ...).
 mkdir -p "$APPDIR/usr/share/glib-2.0/schemas"
-cp /usr/share/glib-2.0/schemas/org.gtk.gtk4.*.gschema.xml /usr/share/glib-2.0/schemas/org.gnome.desktop.*.gschema.xml \
+cp "$GNOME"/share/glib-2.0/schemas/org.gtk.gtk4.*.gschema.xml /usr/share/glib-2.0/schemas/org.gnome.desktop.*.gschema.xml \
   /usr/share/glib-2.0/schemas/*.enums.xml "$APPDIR/usr/share/glib-2.0/schemas/"
-glib-compile-schemas "$APPDIR/usr/share/glib-2.0/schemas"
+LD_LIBRARY_PATH="$GNOME/lib" "$GNOME/bin/glib-compile-schemas" "$APPDIR/usr/share/glib-2.0/schemas"
 
 # Icons: Adwaita's scalable and symbolic ones as the fallback theme (the
 # host's own theme comes first), hicolor, and the app's.
 mkdir -p "$APPDIR/usr/share/icons/Adwaita" "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 cp -a /usr/share/icons/Adwaita/{index.theme,scalable,scalable-up-to-32} "$APPDIR/usr/share/icons/Adwaita/"
 cp /usr/share/icons/hicolor/index.theme "$APPDIR/usr/share/icons/hicolor/"
-cp "$SRC/termite/data/io.github.tahuffman1s.Termite.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/"
-gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/Adwaita"
-gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/hicolor"
+cp "$SRC"/termite/data/icons/hicolor/scalable/apps/*.svg "$APPDIR/usr/share/icons/hicolor/scalable/apps/"
+LD_LIBRARY_PATH="$GNOME/lib" "$GNOME/bin/gtk4-update-icon-cache" -q -t -f "$APPDIR/usr/share/icons/Adwaita"
+LD_LIBRARY_PATH="$GNOME/lib" "$GNOME/bin/gtk4-update-icon-cache" -q -t -f "$APPDIR/usr/share/icons/hicolor"
 
 # The MIME database, which GDK uses to tell an SVG icon is one; desktops
 # have it, minimal systems may not.
@@ -260,8 +286,9 @@ cp -a /usr/share/X11/xkb "$APPDIR/usr/share/X11/"
 # Desktop entry and icon at the top, as AppImages have them.
 mkdir -p "$APPDIR/usr/share/applications"
 cp "$SRC/data/io.github.tahuffman1s.Termite.desktop" "$APPDIR/usr/share/applications/"
-cp "$SRC/data/io.github.tahuffman1s.Termite.desktop" "$SRC/termite/data/io.github.tahuffman1s.Termite.svg" "$APPDIR/"
+cp "$SRC/data/io.github.tahuffman1s.Termite.desktop" "$SRC/termite/data/icons/hicolor/scalable/apps/io.github.tahuffman1s.Termite.svg" "$APPDIR/"
 ln -s io.github.tahuffman1s.Termite.svg "$APPDIR/.DirIcon"
+install -Dm644 "$SRC/data/io.github.tahuffman1s.Termite.metainfo.xml" "$APPDIR/usr/share/metainfo/io.github.tahuffman1s.Termite.appdata.xml"
 install -m755 "$SRC/packaging/AppRun" "$APPDIR/AppRun"
 install -Dm644 "$SRC/packaging/fonts.conf" "$APPDIR/etc/fonts/fonts.conf"
 
@@ -270,7 +297,8 @@ install -Dm644 "$SRC/packaging/fonts.conf" "$APPDIR/etc/fonts/fonts.conf"
 # notices are at chrome://credits in it); OpenConnect's source tarball
 # (LGPL) and vpnc-script, which is its own source (GPL).
 LIC="$APPDIR/usr/share/licenses"
-mkdir -p "$LIC/ubuntu" "$LIC/chromium" "$LIC/openconnect" "$LIC/vpnc-script"
+mkdir -p "$LIC/ubuntu" "$LIC/chromium" "$LIC/openconnect" "$LIC/vpnc-script" "$LIC/gnome"
+cp -r "$GNOME"/share/licenses/* "$LIC/gnome/"
 cp "$SRC/LICENSE" "$LIC/termite.LICENSE"
 patterns=$(find "$APPDIR/usr" -type f \( -name '*.so*' -o -name '*.typelib' \) -printf '*/%f\n' | sort -u)
 pkgs="$( { dpkg -S $patterns 2>/dev/null || true; } | cut -d: -f1 | tr ',' '\n' | tr -d ' ')
@@ -295,6 +323,11 @@ echo "$VPNC_COPYING_SHA256  $LIC/vpnc-script/COPYING" | sha256sum -c --quiet
   echo "- OpenConnect $OPENCONNECT_VERSION (LGPL-2.1): its source is openconnect/openconnect-$OPENCONNECT_VERSION.tar.gz here,"
   echo "  built with packaging/build-appimage.sh from the Termite repository"
   echo "- vpnc-script (GPL-2.0), the script itself: https://gitlab.com/openconnect/vpnc-scripts/-/tree/$VPNC_SCRIPTS_COMMIT"
+  echo "- Built from these release tarballs, unchanged (license texts in gnome/), with"
+  echo "  packaging/build-gnome.sh from the Termite repository:"
+  echo
+  cat "$GNOME"/share/licenses/*/SOURCE | sed 's/^/  /'
+  echo
   echo "- From Ubuntu 22.04, unchanged (their copyright files are in ubuntu/; the sources are"
   echo "  at https://launchpad.net/ubuntu/+source/<source package>/<version>):"
   echo
@@ -311,7 +344,9 @@ import gi, ssl, cryptography
 gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 import termite.gui, termite.cli
-print("build-appimage: imports ok:", ssl.OPENSSL_VERSION)'
+print("build-appimage: imports ok: GTK %d.%d.%d, libadwaita %d.%d.%d, %s" % (
+    Gtk.get_major_version(), Gtk.get_minor_version(), Gtk.get_micro_version(),
+    Adw.get_major_version(), Adw.get_minor_version(), Adw.get_micro_version(), ssl.OPENSSL_VERSION))'
 
 tool="$WORK/appimagetool"
 runtime="$WORK/runtime"

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tahuffman1s.Termite</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Termite</name>
+  <summary>Cisco Secure Client VPN with Microsoft sign-in</summary>
+  <developer id="io.github.tahuffman1s">
+    <name>Travis Huffman</name>
+  </developer>
+  <description>
+    <p>
+      Connect to Cisco Secure Client (AnyConnect) VPNs that sign in with Microsoft.
+      Termite signs you in through a real browser window, so passkeys, phone sign-in
+      and password-manager extensions work, then brings up the tunnel.
+    </p>
+    <ul>
+      <li>Sign in with passkeys, a phone, or a password-manager extension</li>
+      <li>Chromium and OpenConnect included; no plugins needed</li>
+      <li>Uses NetworkManager when it can, so the VPN shows in the network menu</li>
+      <li>A tray icon shows whether you are connected</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.tahuffman1s.Termite.desktop</launchable>
+  <provides>
+    <binary>termite</binary>
+  </provides>
+  <url type="homepage">https://github.com/tahuffman1s/termite</url>
+  <url type="bugtracker">https://github.com/tahuffman1s/termite/issues</url>
+  <url type="vcs-browser">https://github.com/tahuffman1s/termite</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Connected, and not connected</caption>
+      <image>https://raw.githubusercontent.com/tahuffman1s/termite/main/docs/screenshot.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The sign-in browser settings</caption>
+      <image>https://raw.githubusercontent.com/tahuffman1s/termite/main/docs/extensions.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+  <branding>
+    <color type="primary" scheme_preference="light">#99c1f1</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
+  </branding>
+  <releases>
+    <release version="1.4.0" date="2026-10-20">
+      <description>
+        <p>A new look, built on current GTK and libadwaita: settings in a Preferences
+        dialog, a Connection Log, keyboard shortcuts, and clearer errors.</p>
+      </description>
+    </release>
+    <release version="1.3.3" date="2026-10-20"/>
+  </releases>
+</component>

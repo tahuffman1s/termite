@@ -1,6 +1,8 @@
-"""The window: GTK 4 and libadwaita. Written against libadwaita 1.1 (what
-the AppImage bundles), using newer widgets only where they exist."""
+"""The window: GTK 4 and libadwaita (1.6 or newer; the AppImage has 1.9),
+laid out the GNOME way: the connection on a status page, settings in a
+preferences dialog, the rest in the primary menu."""
 
+import json
 import os
 import sys
 import threading
@@ -9,22 +11,36 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
 from . import APP_ID, __version__, config, sso, tray, tunnel  # noqa: E402
 
-LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", f"{APP_ID}.svg")
+if (Adw.get_major_version(), Adw.get_minor_version()) < (1, 6):
+    raise SystemExit(f"termite: needs libadwaita 1.6 or newer, not {Adw.get_major_version()}.{Adw.get_minor_version()} (the AppImage has it)")
 
-# The logo is the status: in colour when connected, greyed out when not.
-CSS = b"""
-.status-logo.disconnected { filter: grayscale(100%); opacity: 0.55; }
-"""
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+ICONS = os.path.join(DATA, "icons")
+LOGO = os.path.join(ICONS, "hicolor", "scalable", "apps", f"{APP_ID}.svg")
+ICON_CONNECTED = APP_ID
+ICON_DISCONNECTED = f"{APP_ID}-disconnected"
+REPO = "https://github.com/tahuffman1s/termite"
 
 METHODS = [
     ("auto", "Automatic"),
     ("networkmanager", "NetworkManager"),
-    ("openconnect", "openconnect (asks for the admin password)"),
+    ("openconnect", "OpenConnect"),
 ]
+
+SHORTCUTS = [
+    ("General", [
+        ("Preferences", "<Control>comma"),
+        ("Connection Log", "<Control>l"),
+        ("Keyboard Shortcuts", "<Control>question"),
+        ("Close Window", "<Control>w"),
+        ("Quit", "<Control>q"),
+    ]),
+    ("Connection", [("Connect or Disconnect", "<Control>Return")]),
+]  # fmt: skip
 
 
 def background(fn, done):
@@ -40,260 +56,174 @@ def background(fn, done):
     threading.Thread(target=work, daemon=True).start()
 
 
-ENTRY_WIDTH = 210
+def sentence(msg):
+    """An error message as a sentence, for a dialog's body."""
+    msg = msg.strip()
+    if not msg:
+        return msg
+    return msg[0].upper() + msg[1:] + ("" if msg[-1] in ".!?)" else ".")
 
 
-def entry_row(title, value, placeholder=""):
-    """A text row: Adw.EntryRow on libadwaita >= 1.2, else an ActionRow with
-    an entry. Returns (row, entry-like widget with get_text/set_text)."""
-    if hasattr(Adw, "EntryRow"):
-        row = Adw.EntryRow(title=title)
-        row.set_text(value)
-        return row, row
-    # Titles on one line, entries all the same width at the end of the row,
-    # so they line up.
-    row = Adw.ActionRow(title=title, title_lines=1)
-    entry = Gtk.Entry(text=value, placeholder_text=placeholder, valign=Gtk.Align.CENTER, width_request=ENTRY_WIDTH)
-    row.add_suffix(entry)
-    row.set_activatable_widget(entry)
-    return row, entry
-
-
-def link_row(title, subtitle, callback):
-    row = Adw.ActionRow(title=title, subtitle=subtitle, activatable=True)
-    row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
-    row.connect("activated", lambda *_: callback())
-    return row
+def home(path):
+    return path.replace(os.path.expanduser("~"), "~", 1)
 
 
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Termite", default_width=480, default_height=760)
+        super().__init__(application=app, title="Termite", default_width=420, default_height=600)
+        self.set_size_request(360, 480)
         self.cfg = config.load()
         self.tunnel = None  # the one that is up, or connecting
+        self.up = False
         self.busy = False
         self.cancel = None
         self.setup_proc = None
-        self.browsers = []
-        self.browser_paths = []
+        self.method_label = ""  # what Automatic uses here
+        self.method_error = ""  # or why there's nothing to use
+        self.log_buffer = Gtk.TextBuffer()
 
-        self.title = Adw.WindowTitle(title="Termite", subtitle="")
-        header = Adw.HeaderBar(title_widget=self.title)
         menu = Gio.Menu()
-        menu.append("About Termite", "app.about")
-        menu.append("Quit", "app.quit")
-        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Menu"))
+        section = Gio.Menu()
+        section.append("Connection _Log", "app.log")
+        menu.append_section(None, section)
+        section = Gio.Menu()
+        section.append("_Preferences", "app.preferences")
+        section.append("_Keyboard Shortcuts", "app.shortcuts")
+        section.append("_About Termite", "app.about")
+        menu.append_section(None, section)
+        header = Adw.HeaderBar()
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main Menu", primary=True))
 
-        self.toasts = Adw.ToastOverlay()
-        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
-        clamp = Adw.Clamp(maximum_size=520, tightening_threshold=400)
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_top=24, margin_bottom=24, margin_start=12, margin_end=12)
-        clamp.set_child(page)
-        scroll.set_child(clamp)
-        self.toasts.set_child(scroll)
+        self.status = Adw.StatusPage(icon_name=ICON_DISCONNECTED, title="Not Connected", vexpand=True)
+        self.status.set_child(self.build_controls())
+        self.toasts = Adw.ToastOverlay(child=self.status)
+        view = Adw.ToolbarView(content=self.toasts)
+        view.add_top_bar(header)
+        self.set_content(view)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.append(header)
-        box.append(self.toasts)
-        self.set_content(box)
+        # Narrow windows: the smaller status page layout.
+        narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 400sp"))
+        narrow.add_setter(self.status, "css-classes", GObject.Value(GObject.type_from_name("GStrv"), ["compact"]))
+        self.add_breakpoint(narrow)
 
-        page.append(self.build_status())
-        page.append(self.build_connection())
-        page.append(self.build_browser())
-        page.append(self.build_details())
+        toggle = Gio.SimpleAction.new("toggle-connection", None)
+        toggle.connect("activate", lambda *_: self.on_connect_clicked())
+        self.add_action(toggle)
+
+        # Enter connects; with an address filled in, the button has focus.
+        self.set_default_widget(self.connect_button)
+        self.connect("map", lambda *_: self.cfg["gateway"] and GLib.idle_add(lambda: self.connect_button.grab_focus() and False))
 
         self.connect("close-request", self.on_close)
         self.refresh_state(False)
         self.poll()
         GLib.timeout_add_seconds(3, self.poll)
 
-    # -- layout ----------------------------------------------------------
+    def build_controls(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        group = Adw.PreferencesGroup()
+        self.gateway = Adw.EntryRow(title="VPN Address", text=self.cfg["gateway"], input_purpose=Gtk.InputPurpose.URL)
+        self.gateway.connect("entry-activated", lambda *_: self.connect_vpn())
+        self.gateway.connect("changed", lambda *_: self.save_gateway())
+        group.add(self.gateway)
+        box.append(group)
 
-    def build_status(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
-        self.icon = Gtk.Image.new_from_file(LOGO)
-        self.icon.set_pixel_size(160)
-        self.icon.add_css_class("status-logo")
-        self.icon.add_css_class("disconnected")
-        self.state_label = Gtk.Label(label="Not connected")
-        self.state_label.add_css_class("title-1")
-        self.spinner = Gtk.Spinner(visible=False)
-
-        buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER, margin_top=12)
-        self.connect_button = Gtk.Button(label="Connect", width_request=160)
+        buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)
+        self.connect_button = Gtk.Button(label="_Connect", use_underline=True, width_request=160)
         self.connect_button.add_css_class("pill")
-        self.connect_button.connect("clicked", self.on_connect_clicked)
-        self.cancel_button = Gtk.Button(label="Cancel", visible=False)
+        self.connect_button.connect("clicked", lambda *_: self.on_connect_clicked())
+        self.spinner = Adw.Spinner(width_request=32, height_request=32, visible=False)
+        self.cancel_button = Gtk.Button(label="C_ancel", use_underline=True, visible=False)
         self.cancel_button.add_css_class("pill")
         self.cancel_button.connect("clicked", self.on_cancel)
-        buttons.append(self.connect_button)
-        buttons.append(self.cancel_button)
-
-        for w in (self.icon, self.state_label, self.spinner, buttons):
-            box.append(w)
-        return box
-
-    def build_connection(self):
-        group = Adw.PreferencesGroup(title="Connection")
-        self.gateway_row, self.gateway = entry_row("VPN address", self.cfg["gateway"], "vpn.example.com")
-        self.group_row, self.group = entry_row("Group (optional)", self.cfg["group"], "the default")
-        self.method_row = Adw.ComboRow(title="Connect with", model=Gtk.StringList.new([label for _, label in METHODS]))
-        keys = [key for key, _ in METHODS]
-        self.method_row.set_selected(keys.index(self.cfg["backend"]) if self.cfg["backend"] in keys else 0)
-        self.method_row.connect("notify::selected", self.on_method_changed)
-        self.nm_row, self.nm_name = entry_row("Connection name", self.cfg["connection"], "Termite")
-        self.nm_row.set_tooltip_text("The name of the NetworkManager connection (added if there is none)")
-        for row in (self.gateway_row, self.group_row, self.method_row, self.nm_row):
-            group.add(row)
-        self.on_method_changed()
-        return group
-
-    def build_browser(self):
-        group = Adw.PreferencesGroup(
-            title="Sign-in browser",
-            description="The Microsoft sign-in opens in a separate browser profile with no extensions. "
-            "To sign in with a password manager or passkey extension, add it to that profile here, "
-            "and close the window before connecting.",
-        )
-        self.browser_row = Adw.ComboRow(title="Browser")
-        self.browser_row.connect("notify::selected", lambda *_: self.update_browser_subtitle())
-        group.add(self.browser_row)
-        self.setup_rows = [
-            link_row("Add extensions", "The Chrome Web Store, in the sign-in profile", lambda: self.open_profile("store")),
-            link_row("Manage extensions", "Turn extensions on or off, or remove them", lambda: self.open_profile("extensions")),
-            link_row("Browser settings", "Passwords, passkeys, proxy and the rest", lambda: self.open_profile("settings")),
-        ]
-        for row in self.setup_rows:
-            group.add(row)
-        self.refresh_browsers()
-        return group
-
-    def refresh_browsers(self, select=None):
-        """The browser list and the rows that depend on it."""
-        self.browsers = sso.find_browsers()
-        names = [name for name, _ in self.browsers]
-        self.browser_paths = [path for _, path in self.browsers]
-        if self.cfg["browser"] and self.cfg["browser"] not in self.browser_paths and os.path.exists(self.cfg["browser"]):
-            names.append(os.path.basename(self.cfg["browser"]))
-            self.browser_paths.append(self.cfg["browser"])
-        self.browser_row.set_model(Gtk.StringList.new(names or ["None"]))
-        self.browser_row.set_sensitive(bool(names))
-        want = select or self.cfg["browser"]
-        if want in self.browser_paths:
-            self.browser_row.set_selected(self.browser_paths.index(want))
-        for row in self.setup_rows:
-            row.set_sensitive(bool(names))
-        self.update_browser_subtitle()
-
-    def build_details(self):
-        group = Adw.PreferencesGroup()
-        expander = Adw.ExpanderRow(title="Details", subtitle="What happened while connecting")
-        self.log_view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        for side in ("top", "bottom", "left", "right"):
-            getattr(self.log_view, f"set_{side}_margin")(12)
-        scroll = Gtk.ScrolledWindow(min_content_height=160, child=self.log_view)
-        expander.add_row(scroll)
-        group.add(expander)
-        return group
+        for w in (self.connect_button, self.spinner, self.cancel_button):
+            buttons.append(w)
+        box.append(buttons)
+        return Adw.Clamp(maximum_size=400, child=box)
 
     # -- state -----------------------------------------------------------
 
     def log(self, msg):
         def add():
-            buf = self.log_view.get_buffer()
-            buf.insert(buf.get_end_iter(), msg.rstrip() + "\n")
-            self.log_view.scroll_to_mark(buf.get_insert(), 0, False, 0, 0)
+            self.log_buffer.insert(self.log_buffer.get_end_iter(), msg.rstrip() + "\n")
             return False
 
         GLib.idle_add(add)
 
     def toast(self, msg):
-        self.toasts.add_toast(Adw.Toast(title=msg, timeout=5))
+        self.toasts.add_toast(Adw.Toast(title=msg))
         if not self.get_visible():
-            # In the tray: a notification instead.
-            note = Gio.Notification.new("Termite")
-            note.set_body(msg)
-            self.get_application().send_notification(None, note)
+            self.notify(msg)
+
+    def notify(self, msg):
+        """A desktop notification (for when the window is in the tray)."""
+        note = Gio.Notification.new("Termite")
+        note.set_body(msg)
+        self.get_application().send_notification(None, note)
+
+    def alert(self, heading, body):
+        """An error that needs reading: a dialog, with the log a click away."""
+        if not self.get_visible():
+            self.notify(f"{heading}: {body}")
+            return
+        dialog = Adw.AlertDialog(heading=heading, body=sentence(body))
+        dialog.add_response("log", "Show _Log")
+        dialog.add_response("close", "_Close")
+        dialog.set_default_response("close")
+        dialog.set_close_response("close")
+        dialog.connect("response", lambda _, r: r == "log" and self.show_log())
+        dialog.present(self)
 
     def sync_tray(self):
         app = self.get_application()
         if app is None or getattr(app, "tray", None) is None:
             return
         if self.busy:
-            tip = self.state_label.get_label()
+            tip = self.status.get_title()
         elif self.up:
             tip = f"Connected to {self.cfg['gateway']}" if self.cfg["gateway"] else "Connected"
         else:
             tip = "Not connected"
         app.tray.update(self.up, self.busy, tip)
 
-    def selected_browser(self):
-        if not self.browser_paths:
-            return None
-        i = self.browser_row.get_selected()
-        return self.browser_paths[i] if 0 <= i < len(self.browser_paths) else self.browser_paths[0]
+    def save_gateway(self):
+        self.cfg["gateway"] = self.gateway.get_text().strip()
+        self.save()
 
-    def update_browser_subtitle(self):
-        b = self.selected_browser()
-        self.browser_row.set_subtitle(
-            f"Profile: {sso.default_profile(b).replace(os.path.expanduser('~'), '~', 1)}"
-            if b
-            else "Install Chromium, Google Chrome, Brave, Microsoft Edge or Vivaldi"
-        )
-
-    def read_settings(self):
-        self.cfg.update(
-            gateway=self.gateway.get_text().strip(),
-            group=self.group.get_text().strip(),
-            backend=METHODS[self.method_row.get_selected()][0],
-            connection=self.nm_name.get_text().strip() or "Termite",
-            browser=self.selected_browser() or "",
-        )
-        if self.browsers and self.cfg["browser"] == self.browsers[0][1]:
-            self.cfg["browser"] = ""  # the first one found: keep following it
+    def save(self):
         try:
             config.save(self.cfg)
         except OSError as e:
             self.log(f"could not save the settings: {e}")
-        return self.cfg
 
-    def on_method_changed(self, *_):
-        self.nm_row.set_visible(METHODS[self.method_row.get_selected()][0] != "openconnect")
+    def browser(self):
+        """The browser the settings name, or the first one found."""
+        if self.cfg["browser"] and os.access(self.cfg["browser"], os.X_OK):
+            return self.cfg["browser"]
+        found = sso.find_browsers()
+        return found[0][1] if found else None
 
     def refresh_state(self, up):
         self.up = up
         if self.busy:
             return
-        if up:
-            self.icon.remove_css_class("disconnected")
-        else:
-            self.icon.add_css_class("disconnected")
-        self.state_label.set_label("Connected" if up else "Not connected")
-        self.title.set_subtitle("Connected" if up else "")
-        self.connect_button.set_label("Disconnect" if up else "Connect")
-        for cls in ("suggested-action", "destructive-action"):
-            self.connect_button.remove_css_class(cls)
-        self.connect_button.add_css_class("destructive-action" if up else "suggested-action")
-        for row in (self.gateway_row, self.group_row, self.method_row, self.nm_row):
-            row.set_sensitive(not up)
+        self.status.set_icon_name(ICON_CONNECTED if up else ICON_DISCONNECTED)
+        self.status.set_title("Connected" if up else "Not Connected")
+        self.connect_button.set_label("_Disconnect" if up else "_Connect")
+        self.connect_button.remove_css_class("destructive-action" if up else "suggested-action")
+        self.connect_button.add_css_class("suggested-action" if not up else "destructive-action")
+        self.gateway.set_sensitive(not up)
         self.sync_tray()
 
-    def set_busy(self, busy, label=""):
+    def set_busy(self, busy, title=""):
         self.busy = busy
         self.spinner.set_visible(busy)
-        self.spinner.set_spinning(busy)
         self.connect_button.set_visible(not busy)
         self.cancel_button.set_visible(busy and self.cancel is not None)
-        for row in (self.gateway_row, self.group_row, self.method_row, self.nm_row, self.browser_row, *self.setup_rows):
-            row.set_sensitive(not busy)
+        self.gateway.set_sensitive(not busy and not self.up)
         if busy:
-            self.state_label.set_label(label)
-            self.title.set_subtitle(label)
+            self.status.set_title(title)
             self.sync_tray()
-        else:
-            self.browser_row.set_sensitive(bool(self.browser_paths))
-            for row in self.setup_rows:
-                row.set_sensitive(bool(self.browser_paths))
 
     def poll(self):
         if self.busy:
@@ -305,8 +235,8 @@ class Window(Adw.ApplicationWindow):
                 self.tunnel.down()
                 self.tunnel = None
                 self.refresh_state(False)
-                self.toast("The tunnel ended (openconnect stopped)")
-                self.present()
+                self.toast("The tunnel ended")
+                self.log("the tunnel ended (openconnect stopped)")
             return True
         cfg = dict(self.cfg)
 
@@ -318,13 +248,10 @@ class Window(Adw.ApplicationWindow):
             if self.busy or (self.tunnel is not None and not self.tunnel.persistent):
                 return
             if error is not None:
-                self.method_row.set_subtitle(str(error))
+                self.method_label, self.method_error = "", str(error)
                 return
             t, up = result
-            auto = self.method_row.get_selected() == 0
-            self.method_row.set_subtitle(f"Uses {t.label} here" if auto else "")
-            if auto:
-                self.nm_row.set_visible(t.persistent)
+            self.method_label, self.method_error = t.label, ""
             if up:
                 self.tunnel = t
             elif self.tunnel is not None:
@@ -341,50 +268,52 @@ class Window(Adw.ApplicationWindow):
         return self.setup_proc is not None and self.setup_proc.poll() is None
 
     def open_profile(self, page):
-        browser = self.selected_browser()
+        browser = self.browser()
         if not browser:
             return
-        self.read_settings()
         try:
             self.setup_proc = sso.open_profile(browser, sso.default_profile(browser), page)
         except OSError as e:
-            self.toast(f"Could not start the browser: {e}")
+            self.alert("Could Not Start the Browser", str(e))
 
-    def on_connect_clicked(self, *_):
+    def on_connect_clicked(self):
+        if self.busy:
+            return
         if self.up:
             self.disconnect_vpn()
         else:
             self.connect_vpn()
 
     def connect_vpn(self):
-        cfg = self.read_settings()
-        if not cfg["gateway"]:
-            self.toast("Enter the VPN address first")
-            self.gateway.grab_focus()
+        if self.busy or self.up:
             return
-        if not self.selected_browser():
-            self.toast("No Chromium-based browser found")
+        self.save_gateway()
+        cfg = dict(self.cfg)
+        if not cfg["gateway"]:
+            self.present()
+            self.gateway.grab_focus()
+            self.toast("Enter the VPN address first")
+            return
+        if not self.browser():
+            self.alert("No Browser for the Sign-In", "Install Chromium, Google Chrome, Brave, Microsoft Edge or Vivaldi.")
             return
         if self.setup_browser_open():
-            self.toast("Close the browser profile window first")
+            self.toast("Close the browser window first")
             return
         self.cancel = threading.Event()
-        self.set_busy(True, "Signing in…")
+        self.set_busy(True, "Signing In…")
         self.log(f"--- connecting to {cfg['gateway']}")
         cancel = self.cancel
-
-        def step(msg):
-            self.log(msg)
 
         def work():
             t = tunnel.choose(cfg)
             self.log(f"connecting with {t.label}")
-            t.ensure(cfg["gateway"], step)
-            session = sso.sign_in(cfg["gateway"], cfg["group"], cfg["browser"] or None, log=step, cancel=cancel)
+            t.ensure(cfg["gateway"], self.log)
+            session = sso.sign_in(cfg["gateway"], cfg["group"], cfg["browser"] or None, log=self.log, cancel=cancel)
             if cancel.is_set():
                 raise sso.Cancelled()
-            GLib.idle_add(lambda: self.connecting(t) and False)
-            t.up(session, step)
+            GLib.idle_add(lambda: self.connecting() and False)
+            t.up(session, self.log)
             return t
 
         def done(t, error):
@@ -392,27 +321,26 @@ class Window(Adw.ApplicationWindow):
             self.set_busy(False)
             if error is None:
                 self.tunnel = t
-                self.refresh_state(True)
                 self.log("connected")
-                self.toast("Connected")
+                self.refresh_state(True)
+                if not self.get_visible():
+                    self.notify(f"Connected to {cfg['gateway']}")
                 return
+            self.refresh_state(False)
             if isinstance(error, sso.Cancelled):
                 self.log("cancelled")
-                self.refresh_state(False)
                 return
-            msg = str(error)
-            self.log(f"error: {msg}")
-            self.refresh_state(False)
-            self.toast(f"Could not connect: {msg}")
+            self.log(f"error: {error}")
+            self.alert("Could Not Connect", str(error))
 
         background(work, done)
 
-    def connecting(self, t):
+    def connecting(self):
         # Past the sign-in: the tunnel can't be cancelled half-way.
         self.cancel = None
         self.cancel_button.set_visible(False)
-        self.state_label.set_label("Connecting…")
-        self.title.set_subtitle("Connecting…")
+        self.status.set_title("Connecting…")
+        self.sync_tray()
 
     def on_cancel(self, *_):
         if self.cancel is not None:
@@ -421,7 +349,13 @@ class Window(Adw.ApplicationWindow):
             GLib.timeout_add(1500, lambda: self.cancel_button.set_sensitive(True) and False)
 
     def disconnect_vpn(self):
-        t = self.tunnel or tunnel.choose(self.cfg)
+        if self.busy:
+            return
+        try:
+            t = self.tunnel or tunnel.choose(self.cfg)
+        except tunnel.TunnelError as e:
+            self.alert("Could Not Disconnect", str(e))
+            return
         self.cancel = None
         self.set_busy(True, "Disconnecting…")
 
@@ -429,8 +363,8 @@ class Window(Adw.ApplicationWindow):
             self.set_busy(False)
             if error is not None:
                 self.log(f"error: {error}")
-                self.toast(f"Could not disconnect: {error}")
                 self.refresh_state(t.is_up())
+                self.alert("Could Not Disconnect", str(error))
                 return
             self.tunnel = None
             self.log("disconnected")
@@ -438,8 +372,10 @@ class Window(Adw.ApplicationWindow):
 
         background(t.down, done)
 
+    def show_log(self):
+        LogDialog(self.log_buffer).present(self)
+
     def on_close(self, *_):
-        self.read_settings()
         app = self.get_application()
         if getattr(app, "tray", None) is not None and app.tray.available:
             # To the tray: Termite keeps running (and the tunnel with it).
@@ -449,11 +385,138 @@ class Window(Adw.ApplicationWindow):
             # The openconnect tunnel lives in this process: keep it, hide the
             # window; opening Termite again brings it back.
             self.set_visible(False)
-            note = Gio.Notification.new("Termite is still connected")
-            note.set_body("Open Termite again to disconnect.")
-            self.get_application().send_notification("connected", note)
+            self.notify("Termite is still connected. Open it again to disconnect.")
             return True
         return False
+
+
+class LogDialog(Adw.Dialog):
+    """What happened while connecting."""
+
+    def __init__(self, buffer):
+        super().__init__(title="Connection Log", content_width=560, content_height=420)
+        self.buffer = buffer
+        header = Adw.HeaderBar()
+        copy = Gtk.Button(icon_name="edit-copy-symbolic", tooltip_text="Copy Log")
+        copy.connect("clicked", self.on_copy)
+        header.pack_start(copy)
+        text = Gtk.TextView(buffer=buffer, editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        text.add_css_class("inline")
+        for side in ("top", "bottom", "left", "right"):
+            getattr(text, f"set_{side}_margin")(12)
+        self.text = text
+        self.stack = Gtk.Stack()
+        self.stack.add_named(Adw.StatusPage(icon_name="text-x-generic-symbolic", title="Nothing Yet", description="Connect, and what happens shows here"), "empty")
+        self.stack.add_named(Gtk.ScrolledWindow(child=text, vexpand=True), "log")
+        self.changed = buffer.connect("changed", lambda *_: self.update())
+        self.connect("closed", lambda *_: buffer.disconnect(self.changed))
+        self.update()
+        self.toasts = Adw.ToastOverlay(child=self.stack)
+        view = Adw.ToolbarView(content=self.toasts)
+        view.add_top_bar(header)
+        self.set_child(view)
+
+    def update(self):
+        empty = self.buffer.get_char_count() == 0
+        self.stack.set_visible_child_name("empty" if empty else "log")
+        if not empty:
+            GLib.idle_add(lambda: self.text.scroll_to_iter(self.buffer.get_end_iter(), 0, False, 0, 0) and False)
+
+    def on_copy(self, *_):
+        start, end = self.buffer.get_bounds()
+        self.get_clipboard().set(self.buffer.get_text(start, end, False))
+        self.toasts.add_toast(Adw.Toast(title="Copied"))
+
+
+class Preferences(Adw.PreferencesDialog):
+    """The settings, saved as they change."""
+
+    def __init__(self, window):
+        super().__init__(search_enabled=True)
+        self.window = window
+        cfg = window.cfg
+
+        page = Adw.PreferencesPage(name="connection", title="Connection", icon_name="network-vpn-symbolic")
+        group = Adw.PreferencesGroup(title="Gateway", description="Leave the group empty for the VPN’s default connection profile")
+        self.group_row = Adw.EntryRow(title="Group", text=cfg["group"])
+        self.group_row.connect("changed", lambda r: self.set("group", r.get_text().strip()))
+        group.add(self.group_row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(title="Method")
+        self.method_row = Adw.ComboRow(title="Connect With", model=Gtk.StringList.new([label for _, label in METHODS]))
+        keys = [key for key, _ in METHODS]
+        self.method_row.set_selected(keys.index(cfg["backend"]) if cfg["backend"] in keys else 0)
+        self.method_row.connect("notify::selected", self.on_method)
+        self.nm_row = Adw.EntryRow(title="NetworkManager Connection", text=cfg["connection"])
+        self.nm_row.connect("changed", lambda r: self.set("connection", r.get_text().strip() or "Termite"))
+        group.add(self.method_row)
+        group.add(self.nm_row)
+        page.add(group)
+        self.add(page)
+
+        page = Adw.PreferencesPage(name="browser", title="Browser", icon_name="web-browser-symbolic")
+        group = Adw.PreferencesGroup(
+            title="Sign-In Browser",
+            description="The Microsoft sign-in opens in a browser profile of its own, with no extensions. "
+            "To use a password manager or passkey extension, add it here, then close the browser window before connecting.",
+        )
+        self.browsers = sso.find_browsers()
+        paths = [path for _, path in self.browsers]
+        names = [name for name, _ in self.browsers]
+        if cfg["browser"] and cfg["browser"] not in paths and os.path.exists(cfg["browser"]):
+            paths.append(cfg["browser"])
+            names.append(os.path.basename(cfg["browser"]))
+        self.paths = paths
+        self.browser_row = Adw.ComboRow(title="Browser", model=Gtk.StringList.new(names or ["None Found"]), sensitive=bool(names))
+        if cfg["browser"] in paths:
+            self.browser_row.set_selected(paths.index(cfg["browser"]))
+        self.browser_row.connect("notify::selected", self.on_browser)
+        group.add(self.browser_row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(title="Profile")
+        self.profile_group = group
+        for title, subtitle, target in (
+            ("Add Extensions", "The Chrome Web Store", "store"),
+            ("Manage Extensions", "Turn extensions on or off, or remove them", "extensions"),
+            ("Browser Settings", "Passwords, passkeys and the rest", "settings"),
+        ):
+            row = Adw.ActionRow(title=title, subtitle=subtitle, activatable=True, sensitive=bool(names))
+            row.add_suffix(Gtk.Image(icon_name="adw-external-link-symbolic"))
+            row.connect("activated", lambda _, t=target: window.open_profile(t))
+            group.add(row)
+        page.add(group)
+        self.add(page)
+
+        self.on_method()
+        self.on_browser()
+
+    def set(self, key, value):
+        self.window.cfg[key] = value
+        self.window.save()
+
+    def on_method(self, *_):
+        key = METHODS[self.method_row.get_selected()][0]
+        self.set("backend", key)
+        if key == "auto":
+            w = self.window
+            self.method_row.set_subtitle(f"Uses {w.method_label} here" if w.method_label else w.method_error)
+        elif key == "openconnect":
+            self.method_row.set_subtitle("Asks for the administrator password")
+        else:
+            self.method_row.set_subtitle("No password needed; shows in the network menu")
+        self.nm_row.set_visible(key == "networkmanager" or (key == "auto" and self.window.method_label == "NetworkManager"))
+
+    def on_browser(self, *_):
+        if not self.paths:
+            self.browser_row.set_subtitle("Install Chromium, Google Chrome, Brave, Microsoft Edge or Vivaldi")
+            return
+        i = self.browser_row.get_selected()
+        path = self.paths[i] if 0 <= i < len(self.paths) else self.paths[0]
+        # The first one found is the default: keep following it.
+        self.set("browser", "" if self.browsers and path == self.browsers[0][1] else path)
+        self.profile_group.set_description(f"Kept in {home(sso.default_profile(path))}")
 
 
 class App(Adw.Application):
@@ -462,18 +525,25 @@ class App(Adw.Application):
         super().__init__(application_id=APP_ID, flags=flags | Gio.ApplicationFlags.HANDLES_COMMAND_LINE | Gio.ApplicationFlags.SEND_ENVIRONMENT)
         self.window = None
         self.tray = None
-        for name, fn in (("about", self.on_about), ("quit", self.on_quit)):
+        for name, fn, accels in (
+            ("preferences", self.on_preferences, ["<Control>comma"]),
+            ("log", lambda *_: self.window.show_log(), ["<Control>l"]),
+            ("shortcuts", self.on_shortcuts, ["<Control>question"]),
+            ("about", self.on_about, []),
+            ("quit", self.on_quit, ["<Control>q"]),
+        ):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", fn)
             self.add_action(action)
-        self.set_accels_for_action("app.quit", ["<Control>q"])
+            self.set_accels_for_action(f"app.{name}", accels)
         self.set_accels_for_action("window.close", ["<Control>w"])
+        self.set_accels_for_action("win.toggle-connection", ["<Control>Return"])
 
     def do_activate(self):
         if self.window is None:
-            css = Gtk.CssProvider()
-            css.load_from_data(CSS)
-            Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            # The logo, connected and not, for the status page (installed
+            # with the AppImage; beside the code when run from source).
+            Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(ICONS)
             self.window = Window(self)
             try:
                 self.tray = tray.Tray(APP_ID, "Termite", LOGO, self.tray_activate, self.tray_toggle, self.on_quit)
@@ -485,33 +555,46 @@ class App(Adw.Application):
         if seconds:
             GLib.timeout_add(int(float(seconds) * 1000), lambda: self_test(self) and False)
 
+    def on_preferences(self, *_):
+        self.window.present()
+        Preferences(self.window).present(self.window)
+
+    def on_shortcuts(self, *_):
+        if not hasattr(Adw, "ShortcutsDialog"):  # libadwaita 1.8
+            return
+        dialog = Adw.ShortcutsDialog()
+        for title, items in SHORTCUTS:
+            section = Adw.ShortcutsSection(title=title)
+            for name, accel in items:
+                section.add(Adw.ShortcutsItem.new(name, accel))
+            dialog.add(section)
+        dialog.present(self.window)
+
     def on_about(self, *_):
-        kw = dict(
+        about = Adw.AboutDialog(
             application_name="Termite",
             application_icon=APP_ID,
+            developer_name="Travis Huffman",
             version=__version__,
-            comments="Cisco Secure Client (AnyConnect) VPN with Microsoft sign-in in a Chromium-based browser.",
-            website="https://github.com/tahuffman1s/termite",
+            comments="Cisco Secure Client VPN with Microsoft sign-in, for any Linux desktop.",
+            website=REPO,
+            issue_url=f"{REPO}/issues",
+            copyright="© 2026 Travis Huffman",
             license_type=Gtk.License.MIT_X11,
+            debug_info=debug_info(self.window.cfg),
+            debug_info_filename="termite-info.json",
         )
-        if hasattr(Adw, "AboutWindow"):
-            Adw.AboutWindow(transient_for=self.window, **kw).present()
-        else:
-            Gtk.AboutDialog(
-                transient_for=self.window,
-                modal=True,
-                program_name=kw["application_name"],
-                logo_icon_name=APP_ID,
-                version=__version__,
-                comments=kw["comments"],
-                website=kw["website"],
-                license_type=kw["license_type"],
-            ).present()
+        about.add_link("Releases", f"{REPO}/releases")
+        about.add_legal_section("Chromium", "© The Chromium Authors", Gtk.License.BSD_3, None)
+        about.add_legal_section("OpenConnect", "© David Woodhouse and the OpenConnect contributors", Gtk.License.LGPL_2_1, None)
+        about.add_legal_section("vpnc-script", "© The OpenConnect and vpnc contributors", Gtk.License.GPL_2_0, None)
+        about.add_legal_section("GTK, libadwaita and GLib", "© The GNOME Project", Gtk.License.LGPL_2_1, None)
+        about.present(self.window)
 
     def do_command_line(self, cmdline):
         """Started again while running (one Termite at a time): the window,
         and a word if the new one is another version, which can't take over
-        from this one while it runs, in the tray say."""
+        from this one while it runs."""
         self.activate()
         launched = cmdline.getenv("TERMITE_LAUNCH_VERSION")
         if launched and launched != __version__:
@@ -527,25 +610,34 @@ class App(Adw.Application):
             w.present()
 
     def tray_toggle(self):
-        """The menu's Connect / Disconnect (and middle click)."""
-        w = self.window
-        if w.busy:
-            return
-        if w.up:
-            w.disconnect_vpn()
-        elif not w.cfg["gateway"]:
-            w.present()
-            w.toast("Enter the VPN address first")
-        else:
-            w.connect_vpn()
+        """The menu's Connect / Disconnect."""
+        self.window.on_connect_clicked()
 
     def on_quit(self, *_):
         w = self.window
-        if w is not None:
-            w.read_settings()
-            if w.tunnel is not None and not w.tunnel.persistent:
-                w.tunnel.down()
+        if w is not None and w.tunnel is not None and not w.tunnel.persistent:
+            w.tunnel.down()
         self.quit()
+
+
+def debug_info(cfg):
+    """For About → Troubleshooting: versions, and what this system has."""
+    info = {
+        "termite": __version__,
+        "gtk": f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}",
+        "libadwaita": f"{Adw.get_major_version()}.{Adw.get_minor_version()}.{Adw.get_micro_version()}",
+        "browsers": [name for name, _ in sso.find_browsers()],
+        "networkmanager": tunnel.NetworkManager.available(),
+        "networkmanager_openconnect_plugin": tunnel.NetworkManager.plugin_installed(),
+        "openconnect": tunnel.system_openconnect() or tunnel.bundled_openconnect(),
+        "no_new_privs": tunnel.no_new_privs(),
+        "settings": {k: v for k, v in cfg.items() if k != "gateway"},
+    }
+    try:
+        info["method"] = tunnel.choose(cfg).label
+    except tunnel.TunnelError as e:
+        info["method"] = f"none: {e}"
+    return json.dumps(info, indent=2)
 
 
 def self_test(app):

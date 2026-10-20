@@ -22,15 +22,25 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
       - name: Test
         run: python3 -m unittest discover -s tests -v
 
+      # GTK, libadwaita and the rest take a while to build: kept until
+      # build-gnome.sh changes.
+      - name: GNOME build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/termite-gnome
+          key: gnome-${{ runner.os }}-${{ hashFiles('packaging/build-gnome.sh') }}
+
       - name: Build
         env:
           TERMITE_BUILD_HERE: "1"
+          TERMITE_GNOME_PREFIX: /home/runner/termite-gnome
         run: packaging/build-appimage.sh dist
 
       - name: Smoke test
