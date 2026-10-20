@@ -1,0 +1,5 @@
+#!/bin/sh
+# A stand-in for systemd-run: drops its options and runs the command, as
+# the same user.
+while [ "${1#--}" != "$1" ]; do shift; done
+exec "$@"

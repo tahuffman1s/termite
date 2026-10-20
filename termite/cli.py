@@ -93,7 +93,7 @@ def cmd_info(args):
         "networkmanager": tunnel.NetworkManager.available(),
         "networkmanager_openconnect_plugin": tunnel.NetworkManager.plugin_installed(),
         "openconnect": tunnel.system_openconnect() or tunnel.bundled_openconnect(),
-        "pkexec": tunnel.elevator("pkexec"),
+        "root_through": (tunnel.OpenConnect().elevation() or ["nothing usable"])[0],
         "no_new_privs": tunnel.no_new_privs(),
         "bundled_chromium": sso.bundled_browser(),
     }

@@ -358,6 +358,44 @@ class BundledOpenConnect(Base):
         self.assertEqual(tunnel.OpenConnect().label, "openconnect (built in)")
 
 
+class NoNewPrivs(Base):
+    """In appimage-run's sandbox: systemd-run instead of pkexec."""
+
+    def setUp(self):
+        super().setUp()
+        self.nnp = tunnel.no_new_privs
+        tunnel.no_new_privs = lambda: True
+
+    def tearDown(self):
+        tunnel.no_new_privs = self.nnp
+        super().tearDown()
+
+    def test_systemd_run(self):
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        self.assertEqual(t.elevation()[0], "systemd-run")
+        self.assertIn("--pipe", t.elevation()[1])
+        lines = []
+        t.ensure("vpn.example.com", lines.append)
+        t.up(SESSION_DICT, lines.append)
+        self.assertIn("through systemd-run", " ".join(lines))
+        self.assertTrue(t.is_up())
+        time.sleep(0.5)
+        t.down()
+        self.assertFalse(t.is_up())
+
+    def test_neither(self):
+        os.environ["PATH"] = "/nonexistent"
+        t = tunnel.OpenConnect("pkexec")
+        t.openconnect = "/bin/true"
+        known, tunnel.SYSTEMD_RUN = tunnel.SYSTEMD_RUN, ()
+        try:
+            with self.assertRaisesRegex(tunnel.TunnelError, "no new privileges"):
+                t.ensure("vpn.example.com", lambda m: None)
+        finally:
+            tunnel.SYSTEMD_RUN = known
+
+
 class Elevator(Base):
     def setUp(self):
         super().setUp()

@@ -19,7 +19,9 @@ tunnel:
 - **OpenConnect** otherwise, so NetworkManager's plugin isn't needed: the
   system's `openconnect` if it is 9.0 or newer, else the one in the AppImage
   (9.21, with vpnc-script). It runs as root through `pkexec`, which asks for the
-  administrator password, and vpnc-script sets up routes and DNS (through
+  administrator password (or, where Termite may not gain privileges, as in
+  NixOS's `appimage-run` sandbox, through `systemd-run`, which asks through
+  polkit the same way), and vpnc-script sets up routes and DNS (through
   systemd-resolved where there is one). The tunnel lasts while Termite runs.
   Root can't read an AppImage's files, so Termite hands the bundled OpenConnect
   to it through a pipe, into a directory under `/run` only root can write to,
@@ -91,7 +93,8 @@ AppImage (about 225 MB); graphics, fonts and CA certificates come from the syste
 libraries every desktop has (fontconfig, X11, zlib, ...) come from the system
 too, or from the AppImage on systems that keep them elsewhere, like NixOS
 (where `programs.nix-ld` must be on, as for any AppImage run directly, or use
-`appimage-run`). The AppImage uses the static AppImage runtime, so it doesn't
+`appimage-run`; with `programs.appimage.binfmt` AppImages go through
+`appimage-run` by themselves, and Termite works there too). The AppImage uses the static AppImage runtime, so it doesn't
 need `libfuse2`. Tools like Gear Lever or AppImageLauncher add it to the app
 menu.
 

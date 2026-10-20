@@ -68,7 +68,11 @@ class NetworkManager:
 
     @staticmethod
     def plugin_installed():
-        for d in ("/usr/lib/NetworkManager/VPN", "/usr/lib64/NetworkManager/VPN", "/usr/local/lib/NetworkManager/VPN", "/etc/NetworkManager/VPN"):
+        # NixOS's too, by a path that appimage-run's sandbox (which has an
+        # /etc of its own) can see.
+        dirs = ("/usr/lib/NetworkManager/VPN", "/usr/lib64/NetworkManager/VPN", "/usr/local/lib/NetworkManager/VPN",
+                "/etc/NetworkManager/VPN", "/run/current-system/etc/NetworkManager/VPN")  # fmt: skip
+        for d in dirs:
             for f in glob.glob(os.path.join(d, "*.name")):
                 try:
                     with open(f) as fh:
@@ -220,6 +224,10 @@ def no_new_privs():
         return False
 
 
+# Where systemd-run is when PATH (in a sandbox, say) doesn't have it.
+SYSTEMD_RUN = ("/run/current-system/sw/bin/systemd-run", "/usr/bin/systemd-run", "/bin/systemd-run")
+
+
 def bundled_openconnect():
     """The AppImage's OpenConnect directory (openconnect, its libraries and
     vpnc-script), if there is one."""
@@ -271,16 +279,34 @@ class OpenConnect:
         except (OSError, ValueError, IndexError):
             return False
 
+    def elevation(self):
+        """How to run the root script, as (name, argv prefix), or None.
+        pkexec (sudo from a terminal), unless this process may not gain
+        privileges (appimage-run's sandbox on NixOS, some launchers): then
+        systemd-run, which asks systemd over D-Bus (polkit asks for the
+        password), not a setuid program."""
+        if not no_new_privs():
+            path = elevator(self.elevate)
+            if path:
+                return self.elevate, [path]
+        path = which("systemd-run") or next((p for p in SYSTEMD_RUN if os.access(p, os.X_OK)), None)
+        if path:
+            return "systemd-run", [
+                path, "--quiet", "--pipe", "--wait", "--collect", "--service-type=exec",
+                "--description=Termite VPN (openconnect)",
+            ]  # fmt: skip
+        return None
+
     def ensure(self, gateway, log):
         if not (self.openconnect or self.bundle):
             raise TunnelError("openconnect 9 or newer is not installed")
-        if not elevator(self.elevate):
+        if self.elevation() is None:
+            if no_new_privs():
+                raise TunnelError(
+                    "Termite runs with no new privileges allowed (appimage-run's sandbox, or its launcher), so it can't start "
+                    "openconnect as root, and systemd-run isn't here to ask systemd instead; use NetworkManager, or run the AppImage directly"
+                )
             raise TunnelError(f"{self.elevate} is not installed; it is needed to start openconnect as root")
-        if no_new_privs():
-            raise TunnelError(
-                f"Termite was started with no new privileges allowed (by its launcher or a sandbox), so {self.elevate} "
-                "can't start openconnect as root; start Termite from the app menu or a terminal, or use NetworkManager"
-            )
 
     def _bundle_tar(self):
         buf = io.BytesIO()
@@ -296,9 +322,10 @@ class OpenConnect:
             cmd.append(f"--servercert={session['servercert']}")
         cmd.append(session["url"])
         bundle = self._bundle_tar() if self.bundle else b""
-        log(f"starting {self.label} as root (through {self.elevate})")
+        how, prefix = self.elevation() or (self.elevate, [self.elevate])
+        log(f"starting {self.label} as root (through {how})")
         self.proc = subprocess.Popen(
-            [elevator(self.elevate), "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, *cmd],
+            [*prefix, "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, *cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -329,7 +356,7 @@ class OpenConnect:
             except BrokenPipeError:
                 pass
             self.proc = None
-            if self.elevate == "pkexec" and status == "" and not errors:
+            if how != "sudo" and status == "" and not errors:
                 raise TunnelError("the administrator password was not given")
             raise TunnelError(errors[-1] if errors else f"openconnect did not start ({status or 'no output'})")
         self.connected = True
