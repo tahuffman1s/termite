@@ -354,6 +354,24 @@ class BundledOpenConnect(Base):
         self.assertEqual(tunnel.OpenConnect().label, "openconnect (built in)")
 
 
+class Elevator(Base):
+    def test_setuid_one_first(self):
+        # NixOS: a plain pkexec on PATH, the setuid wrapper elsewhere.
+        plain, wrapped = os.path.join(self.tmp, "plain"), os.path.join(self.tmp, "wrappers")
+        for d, mode in ((plain, 0o755), (wrapped, 0o4755)):
+            os.makedirs(d)
+            with open(os.path.join(d, "pkexec"), "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(os.path.join(d, "pkexec"), mode)
+        if not os.stat(os.path.join(wrapped, "pkexec")).st_mode & 0o4000:
+            self.skipTest("this filesystem drops the setuid bit")
+        os.environ["PATH"] = f"{plain}:{wrapped}:{os.environ['PATH']}"
+        self.assertEqual(tunnel.elevator("pkexec"), os.path.join(wrapped, "pkexec"))
+
+    def test_falls_back_to_path(self):
+        self.assertEqual(tunnel.elevator("pkexec"), os.path.join(FAKES, "pkexec"))
+
+
 class Config(Base):
     def test_roundtrip(self):
         cfg = config.load()

@@ -15,6 +15,7 @@ import glob
 import io
 import os
 import re
+import stat
 import subprocess
 import tarfile
 import threading
@@ -193,6 +194,22 @@ stop
 """
 
 
+def elevator(name):
+    """pkexec or sudo, the setuid one: NixOS has its setuid wrappers in
+    /run/wrappers/bin and plain copies (which refuse to run) elsewhere on
+    PATH, which may come first. Falls back to the first one on PATH."""
+    path = host_env().get("PATH", os.defpath).split(":")
+    for d in ["/run/wrappers/bin", *path]:
+        candidate = os.path.join(d, name)
+        try:
+            st = os.stat(candidate)
+        except OSError:
+            continue
+        if st.st_mode & stat.S_ISUID and os.access(candidate, os.X_OK):
+            return candidate
+    return which(name)
+
+
 def bundled_openconnect():
     """The AppImage's OpenConnect directory (openconnect, its libraries and
     vpnc-script), if there is one."""
@@ -247,7 +264,7 @@ class OpenConnect:
     def ensure(self, gateway, log):
         if not (self.openconnect or self.bundle):
             raise TunnelError("openconnect 9 or newer is not installed")
-        if not which(self.elevate):
+        if not elevator(self.elevate):
             raise TunnelError(f"{self.elevate} is not installed; it is needed to start openconnect as root")
 
     def _bundle_tar(self):
@@ -266,7 +283,7 @@ class OpenConnect:
         bundle = self._bundle_tar() if self.bundle else b""
         log(f"starting {self.label} as root (through {self.elevate})")
         self.proc = subprocess.Popen(
-            [which(self.elevate), "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, *cmd],
+            [elevator(self.elevate), "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, *cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
