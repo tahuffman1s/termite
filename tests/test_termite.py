@@ -85,10 +85,14 @@ class Base(unittest.TestCase):
         }
         self.saved = dict(os.environ)
         os.environ.update(self.env)
+        # The fake pkexec, even where a real setuid one is installed.
+        self.elevator = tunnel.elevator
+        tunnel.elevator = lambda name: os.path.join(FAKES, name)
         for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL"):
             os.environ.pop(var, None)
 
     def tearDown(self):
+        tunnel.elevator = self.elevator
         os.environ.clear()
         os.environ.update(self.saved)
 
@@ -355,6 +359,11 @@ class BundledOpenConnect(Base):
 
 
 class Elevator(Base):
+    def setUp(self):
+        super().setUp()
+        if os.path.exists("/run/wrappers/bin/pkexec"):
+            self.skipTest("NixOS: the real setuid wrapper would come first")
+
     def test_setuid_one_first(self):
         # NixOS: a plain pkexec on PATH, the setuid wrapper elsewhere.
         plain, wrapped = os.path.join(self.tmp, "plain"), os.path.join(self.tmp, "wrappers")
@@ -365,11 +374,13 @@ class Elevator(Base):
             os.chmod(os.path.join(d, "pkexec"), mode)
         if not os.stat(os.path.join(wrapped, "pkexec")).st_mode & 0o4000:
             self.skipTest("this filesystem drops the setuid bit")
-        os.environ["PATH"] = f"{plain}:{wrapped}:{os.environ['PATH']}"
-        self.assertEqual(tunnel.elevator("pkexec"), os.path.join(wrapped, "pkexec"))
+        os.environ["PATH"] = f"{plain}:{wrapped}"
+        self.assertEqual(self.elevator("pkexec"), os.path.join(wrapped, "pkexec"))
 
     def test_falls_back_to_path(self):
-        self.assertEqual(tunnel.elevator("pkexec"), os.path.join(FAKES, "pkexec"))
+        # No setuid one: the first on PATH.
+        os.environ["PATH"] = FAKES
+        self.assertEqual(self.elevator("pkexec"), os.path.join(FAKES, "pkexec"))
 
 
 class Config(Base):
