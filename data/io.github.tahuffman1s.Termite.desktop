@@ -9,3 +9,4 @@ Terminal=false
 Categories=Network;GTK;
 Keywords=vpn;anyconnect;cisco;secure client;openconnect;
 StartupNotify=true
+StartupWMClass=io.github.tahuffman1s.Termite

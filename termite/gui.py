@@ -13,7 +13,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
-from . import APP_ID, __version__, config, sso, tray, tunnel  # noqa: E402
+from . import APP_ID, __version__, config, integrate, sso, tray, tunnel  # noqa: E402
 
 if (Adw.get_major_version(), Adw.get_minor_version()) < (1, 6):
     raise SystemExit(f"termite: needs libadwaita 1.6 or newer, not {Adw.get_major_version()}.{Adw.get_minor_version()} (the AppImage has it)")
@@ -453,6 +453,17 @@ class Preferences(Adw.PreferencesDialog):
         group.add(self.method_row)
         group.add(self.nm_row)
         page.add(group)
+
+        if integrate.appimage():
+            group = Adw.PreferencesGroup(title="Desktop")
+            row = Adw.SwitchRow(title="Add to App Menu", subtitle="Termite’s icon and a menu entry for this AppImage",
+                                active=cfg["menu"] != "no")  # fmt: skip
+            if not integrate.ours():
+                row.set_subtitle("Installed some other way already")
+                row.set_sensitive(False)
+            row.connect("notify::active", self.on_menu)
+            group.add(row)
+            page.add(group)
         self.add(page)
 
         page = Adw.PreferencesPage(name="browser", title="Browser", icon_name="web-browser-symbolic")
@@ -508,6 +519,16 @@ class Preferences(Adw.PreferencesDialog):
             self.method_row.set_subtitle("No password needed; shows in the network menu")
         self.nm_row.set_visible(key == "networkmanager" or (key == "auto" and self.window.method_label == "NetworkManager"))
 
+    def on_menu(self, row, *_):
+        self.set("menu", "yes" if row.get_active() else "no")
+        try:
+            if row.get_active():
+                integrate.install(__version__)
+            else:
+                integrate.remove()
+        except OSError as e:
+            self.add_toast(Adw.Toast(title=f"Could not change the menu entry: {e.strerror}"))
+
     def on_browser(self, *_):
         if not self.paths:
             self.browser_row.set_subtitle("Install Chromium, Google Chrome, Brave, Microsoft Edge or Vivaldi")
@@ -544,6 +565,14 @@ class App(Adw.Application):
             # The logo, connected and not, for the status page (installed
             # with the AppImage; beside the code when run from source).
             Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(ICONS)
+            Gtk.Window.set_default_icon_name(APP_ID)
+            # The window's icon, on Wayland, comes from the menu entry named
+            # after the app ID: the AppImage puts one in place.
+            if config.load()["menu"] != "no":
+                try:
+                    integrate.install(__version__)
+                except OSError as e:
+                    print(f"termite: could not add the menu entry: {e}", file=sys.stderr)
             self.window = Window(self)
             try:
                 self.tray = tray.Tray(APP_ID, "Termite", LOGO, self.tray_activate, self.tray_toggle, self.on_quit)

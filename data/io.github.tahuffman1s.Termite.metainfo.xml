@@ -52,6 +52,12 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.4.1" date="2026-10-20">
+      <description>
+        <p>The window shows Termite's icon: the AppImage adds its menu entry and icon,
+        or matches the window to the entry an AppImage manager made.</p>
+      </description>
+    </release>
     <release version="1.4.0" date="2026-10-20">
       <description>
         <p>A new look, built on current GTK and libadwaita: settings in a Preferences

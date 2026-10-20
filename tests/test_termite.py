@@ -18,7 +18,7 @@ SRC = os.path.dirname(HERE)
 FAKES = os.path.join(HERE, "fakes")
 sys.path.insert(0, SRC)
 
-from termite import config, sso, tunnel  # noqa: E402
+from termite import config, integrate, sso, tunnel  # noqa: E402
 
 TOKEN = "saml-token-123"
 SESSION = "session-456"
@@ -88,7 +88,7 @@ class Base(unittest.TestCase):
         # The fake pkexec, even where a real setuid one is installed.
         self.elevator = tunnel.elevator
         tunnel.elevator = lambda name: os.path.join(FAKES, name)
-        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL"):
+        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "APPIMAGE"):
             os.environ.pop(var, None)
 
     def tearDown(self):
@@ -419,6 +419,63 @@ class Elevator(Base):
         # No setuid one: the first on PATH.
         os.environ["PATH"] = FAKES
         self.assertEqual(self.elevator("pkexec"), os.path.join(FAKES, "pkexec"))
+
+
+class Integrate(Base):
+    def setUp(self):
+        super().setUp()
+        self.appimage = os.path.join(self.tmp, "My Apps", "Termite-1.4.1-x86_64.AppImage")
+        os.makedirs(os.path.dirname(self.appimage))
+        open(self.appimage, "w").close()
+        os.environ["APPIMAGE"] = self.appimage
+        self.data = os.path.join(self.tmp, "data")
+
+    def test_install(self):
+        self.assertTrue(integrate.install("1.4.1"))
+        desktop = read(os.path.join(self.data, "applications", "io.github.tahuffman1s.Termite.desktop"))
+        self.assertIn(f'Exec="{self.appimage}"', desktop)
+        self.assertIn("Icon=io.github.tahuffman1s.Termite\n", desktop)
+        self.assertIn("StartupWMClass=io.github.tahuffman1s.Termite", desktop)
+        for name in ("io.github.tahuffman1s.Termite", "io.github.tahuffman1s.Termite-disconnected"):
+            self.assertTrue(os.path.exists(os.path.join(self.data, "icons", "hicolor", "scalable", "apps", f"{name}.svg")))
+        self.assertFalse(integrate.install("1.4.1"))  # nothing to change
+        integrate.remove()
+        self.assertFalse(os.path.exists(os.path.join(self.data, "applications", "io.github.tahuffman1s.Termite.desktop")))
+
+    def test_leaves_others_alone(self):
+        path = os.path.join(self.data, "applications", "io.github.tahuffman1s.Termite.desktop")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as f:
+            f.write("[Desktop Entry]\nName=Termite (packaged)\n")
+        self.assertFalse(integrate.install("1.4.1"))
+        integrate.remove()
+        self.assertIn("packaged", read(path))
+
+    def test_an_appimage_manager_was_first(self):
+        apps = os.path.join(self.data, "applications")
+        os.makedirs(apps)
+        with open(os.path.join(apps, "gearlever_termite_8a1b.desktop"), "w") as f:
+            f.write(f"[Desktop Entry]\nName=Termite\nExec={self.appimage}\nStartupWMClass=io.github.tahuffman1s.Termite\n")
+        self.assertFalse(integrate.install("1.4.1"))
+        self.assertEqual(os.listdir(apps), ["gearlever_termite_8a1b.desktop"])
+
+    def test_an_older_appimage_managers_entry_gets_matched(self):
+        apps = os.path.join(self.data, "applications")
+        os.makedirs(apps)
+        entry = os.path.join(apps, "gearlever_termite_8a1b.desktop")
+        with open(entry, "w") as f:
+            f.write(f"[Desktop Entry]\nName=Termite\nExec={self.appimage}\n\n[Desktop Action x]\nName=X\n")
+        self.assertTrue(integrate.install("1.4.1"))
+        self.assertEqual(read(entry), f"[Desktop Entry]\nName=Termite\nExec={self.appimage}\nStartupWMClass=io.github.tahuffman1s.Termite\n\n[Desktop Action x]\nName=X\n")
+        self.assertFalse(integrate.install("1.4.1"))
+        self.assertEqual(os.listdir(apps), ["gearlever_termite_8a1b.desktop"])
+
+    def test_not_an_appimage(self):
+        del os.environ["APPIMAGE"]
+        self.assertFalse(integrate.install("1.4.1"))
+
+    def test_quote(self):
+        self.assertEqual(integrate.quote('/a b/$x"y%'), '"/a b/\\$x\\"y%%"')
 
 
 class Config(Base):
