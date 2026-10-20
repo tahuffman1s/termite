@@ -459,7 +459,7 @@ class Window(Adw.ApplicationWindow):
 class App(Adw.Application):
     def __init__(self):
         flags = getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE)
-        super().__init__(application_id=APP_ID, flags=flags)
+        super().__init__(application_id=APP_ID, flags=flags | Gio.ApplicationFlags.HANDLES_COMMAND_LINE | Gio.ApplicationFlags.SEND_ENVIRONMENT)
         self.window = None
         self.tray = None
         for name, fn in (("about", self.on_about), ("quit", self.on_quit)):
@@ -508,6 +508,16 @@ class App(Adw.Application):
                 license_type=kw["license_type"],
             ).present()
 
+    def do_command_line(self, cmdline):
+        """Started again while running (one Termite at a time): the window,
+        and a word if the new one is another version, which can't take over
+        from this one while it runs, in the tray say."""
+        self.activate()
+        launched = cmdline.getenv("TERMITE_LAUNCH_VERSION")
+        if launched and launched != __version__:
+            self.window.toast(f"Termite {__version__} is running; quit it to start {launched}")
+        return 0
+
     def tray_activate(self):
         """Left click: the window, or away with it."""
         w = self.window
@@ -547,4 +557,6 @@ def self_test(app):
 
 
 def main(argv=None):
+    # For a Termite already running (App.do_command_line).
+    os.environ["TERMITE_LAUNCH_VERSION"] = __version__
     return App().run(argv if argv is not None else sys.argv)

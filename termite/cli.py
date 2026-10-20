@@ -92,7 +92,9 @@ def cmd_info(args):
         "browsers": [{"name": n, "path": p, "profile": sso.default_profile(p)} for n, p in browsers],
         "networkmanager": tunnel.NetworkManager.available(),
         "networkmanager_openconnect_plugin": tunnel.NetworkManager.plugin_installed(),
-        "openconnect": sso.which("openconnect", sbin=True),
+        "openconnect": tunnel.system_openconnect() or tunnel.bundled_openconnect(),
+        "pkexec": tunnel.elevator("pkexec"),
+        "no_new_privs": tunnel.no_new_privs(),
         "bundled_chromium": sso.bundled_browser(),
     }
     try:

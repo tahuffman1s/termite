@@ -210,6 +210,16 @@ def elevator(name):
     return which(name)
 
 
+def no_new_privs():
+    """Whether this process may not gain privileges (prctl NO_NEW_PRIVS, set
+    by some launchers and sandboxes): then pkexec and sudo can't work."""
+    try:
+        with open("/proc/self/status") as f:
+            return any(line.split() == ["NoNewPrivs:", "1"] for line in f)
+    except OSError:
+        return False
+
+
 def bundled_openconnect():
     """The AppImage's OpenConnect directory (openconnect, its libraries and
     vpnc-script), if there is one."""
@@ -266,6 +276,11 @@ class OpenConnect:
             raise TunnelError("openconnect 9 or newer is not installed")
         if not elevator(self.elevate):
             raise TunnelError(f"{self.elevate} is not installed; it is needed to start openconnect as root")
+        if no_new_privs():
+            raise TunnelError(
+                f"Termite was started with no new privileges allowed (by its launcher or a sandbox), so {self.elevate} "
+                "can't start openconnect as root; start Termite from the app menu or a terminal, or use NetworkManager"
+            )
 
     def _bundle_tar(self):
         buf = io.BytesIO()
