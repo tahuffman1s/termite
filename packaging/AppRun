@@ -52,6 +52,8 @@ for f in "$HERE"/usr/lib/chromium-deps/*.so*; do
 done
 [ -e "$chromium_dir/libnss3.so" ] && ln -sfn "$HERE/usr/lib/chromium-deps/nss" "$chromium_dir/nss"
 export TERMITE_CHROMIUM="$HERE/usr/lib/chromium/chrome" TERMITE_CHROMIUM_LIBS="$chromium_dir"
+# OpenConnect, for connecting without NetworkManager's plugin (termite.tunnel).
+export TERMITE_OPENCONNECT_DIR="$HERE/usr/lib/openconnect"
 
 export LD_LIBRARY_PATH="$HERE/usr/lib:$fallback_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONHOME="$HERE/usr"

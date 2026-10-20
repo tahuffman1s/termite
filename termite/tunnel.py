@@ -6,13 +6,17 @@
   sets up the routes and DNS, the desktop's network menu shows the VPN and
   can disconnect it, and it stays up when this app closes.
 - openconnect directly, as root through pkexec (or sudo in a terminal), for
-  systems without NetworkManager's plugin. openconnect's vpnc-script sets up
-  routes and DNS. The tunnel lasts as long as this app holds it.
+  systems without NetworkManager's plugin: the system's, or the AppImage's
+  own. vpnc-script sets up routes and DNS. The tunnel lasts as long as this
+  app holds it.
 """
 
 import glob
+import io
 import os
+import re
 import subprocess
+import tarfile
 import threading
 
 from .sso import host_env, which
@@ -149,15 +153,39 @@ class NetworkManager:
             raise TunnelError(last_line(r.stderr))
 
 
-# Run as root: reads the cookie from stdin, starts openconnect in the
-# background (it returns once the tunnel is up), says "connected" on stdout,
-# then waits for a line (or the end) of stdin, or a signal, and stops it.
-# Holding the stop on stdin means the tunnel never outlives the app.
+# Run as root. Reads from stdin the cookie, then the size of the bundled
+# OpenConnect directory and that directory as a tar (0 and nothing when the
+# system's openconnect is in the arguments): root can't read the AppImage's
+# mount, so it comes this way, into a directory only root can write to.
+# Starts openconnect in the background (it returns once the tunnel is up),
+# says "connected" on stdout, then waits for a line (or the end) of stdin,
+# or a signal, and stops it. Holding the stop on stdin means the tunnel
+# never outlives the app.
 OPENCONNECT_SCRIPT = r"""
+# Where the tools are, NixOS's included (for this and vpnc-script).
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:/run/current-system/sw/bin:/run/current-system/sw/sbin"
+export PATH
 pidfile=$1; shift
 IFS= read -r cookie || exit 2
-printf '%s\n' "$cookie" | "$@" --background --pid-file="$pidfile" >&2 || { echo "failed $?"; exit 1; }
-stop() { [ -s "$pidfile" ] && kill -INT "$(cat "$pidfile")" 2>/dev/null; rm -f "$pidfile"; exit 0; }
+IFS= read -r size || exit 2
+dir=
+if [ "$size" -gt 0 ]; then
+  dir=$(mktemp -d "${TERMITE_RUN_DIR:-/run}/termite-openconnect.XXXXXX") || exit 2
+  head -c "$size" | tar -x -f - -C "$dir" || { rm -rf "$dir"; exit 2; }
+  set -- "$dir/openconnect" --script="$dir/vpnc-script" "$@"
+fi
+cleanup() { [ -z "$dir" ] || rm -rf "$dir"; rm -f "$pidfile"; }
+printf '%s\n' "$cookie" | "$@" --background --pid-file="$pidfile" >&2 || { s=$?; cleanup; echo "failed $s"; exit 1; }
+stop() {
+  pid=$(cat "$pidfile" 2>/dev/null)
+  if [ -n "$pid" ] && kill -INT "$pid" 2>/dev/null; then
+    # Until it has run vpnc-script's disconnect, which puts routes and DNS back.
+    n=0
+    while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 150 ]; do sleep 0.1; n=$((n + 1)); done
+  fi
+  cleanup
+  exit 0
+}
 trap stop INT TERM HUP
 echo connected
 read -r _ || true
@@ -165,12 +193,36 @@ stop
 """
 
 
+def bundled_openconnect():
+    """The AppImage's OpenConnect directory (openconnect, its libraries and
+    vpnc-script), if there is one."""
+    d = os.environ.get("TERMITE_OPENCONNECT_DIR")
+    return d if d and os.access(os.path.join(d, "openconnect"), os.X_OK) else None
+
+
+def system_openconnect():
+    """The system's openconnect, if it is new enough for the single sign-on
+    cookie (9.0, which brought it)."""
+    path = which("openconnect", sbin=True)
+    if not path:
+        return None
+    try:
+        out = run([path, "--version"], timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"OpenConnect version v?(\d+)\.", out)
+    return path if m and int(m.group(1)) >= 9 else None
+
+
 class OpenConnect:
     label = "openconnect"
     persistent = False
 
     def __init__(self, elevate="pkexec"):
-        self.openconnect = which("openconnect", sbin=True)
+        self.openconnect = system_openconnect()
+        self.bundle = None if self.openconnect else bundled_openconnect()
+        if self.bundle:
+            self.label = "openconnect (built in)"
         self.elevate = elevate
         self.proc = None
         self.connected = False
@@ -178,7 +230,7 @@ class OpenConnect:
 
     @staticmethod
     def available():
-        return bool(which("openconnect", sbin=True))
+        return bool(system_openconnect() or bundled_openconnect())
 
     def is_up(self):
         if not (self.connected and self.proc is not None and self.proc.poll() is None):
@@ -193,46 +245,57 @@ class OpenConnect:
             return False
 
     def ensure(self, gateway, log):
-        if not self.openconnect:
-            raise TunnelError("openconnect is not installed")
+        if not (self.openconnect or self.bundle):
+            raise TunnelError("openconnect 9 or newer is not installed")
         if not which(self.elevate):
             raise TunnelError(f"{self.elevate} is not installed; it is needed to start openconnect as root")
 
+    def _bundle_tar(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for name in sorted(os.listdir(self.bundle)):
+                tar.add(os.path.join(self.bundle, name), arcname=name)
+        return buf.getvalue()
+
     def up(self, session, log):
-        cmd = [self.openconnect, "--protocol=anyconnect", "--useragent=AnyConnect", "--cookie-on-stdin"]
+        cmd = [self.openconnect] if self.openconnect else []
+        cmd += ["--protocol=anyconnect", "--useragent=AnyConnect", "--cookie-on-stdin"]
         if session.get("servercert"):
             cmd.append(f"--servercert={session['servercert']}")
         cmd.append(session["url"])
-        log(f"starting openconnect as root (through {self.elevate})")
+        bundle = self._bundle_tar() if self.bundle else b""
+        log(f"starting {self.label} as root (through {self.elevate})")
         self.proc = subprocess.Popen(
             [which(self.elevate), "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, *cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             env=host_env(),
         )
         errors = []
 
         def drain(stream=self.proc.stderr):
             with stream:
-                for line in stream:
-                    line = line.rstrip()
+                for raw in stream:
+                    line = raw.decode(errors="replace").rstrip()
                     if line:
                         errors.append(line)
                         log(line)
 
         threading.Thread(target=drain, daemon=True).start()
         try:
-            self.proc.stdin.write(session["cookie"] + "\n")
+            self.proc.stdin.write(f"{session['cookie']}\n{len(bundle)}\n".encode() + bundle)
             self.proc.stdin.flush()
         except BrokenPipeError:
             pass
-        status = self.proc.stdout.readline().strip()
+        status = self.proc.stdout.readline().decode(errors="replace").strip()
         if status != "connected":
             self.proc.wait()
             self.proc.stdout.close()
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
             self.proc = None
             if self.elevate == "pkexec" and status == "" and not errors:
                 raise TunnelError("the administrator password was not given")
@@ -243,7 +306,7 @@ class OpenConnect:
         if self.proc is None:
             return
         try:
-            self.proc.stdin.write("\n")
+            self.proc.stdin.write(b"\n")
             self.proc.stdin.close()
         except (BrokenPipeError, ValueError):
             pass
@@ -268,4 +331,4 @@ def choose(cfg, elevate="pkexec"):
         return OpenConnect(elevate)
     if NetworkManager.available():
         return NetworkManager(cfg.get("connection"))  # ensure() says what is missing
-    raise TunnelError("neither NetworkManager (with its OpenConnect plugin) nor openconnect is installed")
+    raise TunnelError("neither NetworkManager (with its OpenConnect plugin) nor openconnect 9 or newer is installed")

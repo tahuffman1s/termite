@@ -3,15 +3,18 @@
 # libadwaita from Ubuntu 22.04, so it runs on distributions with glibc 2.35
 # or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch, openSUSE
 # Tumbleweed, ...), and the open-source Chromium build for the sign-in
-# (packaging/fetch-chromium.py). Graphics, fonts and the like come from the
-# host (see excludelist).
+# (packaging/fetch-chromium.py), and OpenConnect built from source with
+# vpnc-script, for connecting without NetworkManager's plugin. Graphics,
+# fonts and the like come from the host (see excludelist). License texts
+# and where the sources are: usr/share/licenses.
 #
 # Usage: packaging/build-appimage.sh [OUT_DIR]   (default: dist/)
 # Runs itself in an ubuntu:22.04 container (docker or podman) unless
 # TERMITE_BUILD_HERE=1, which CI sets on an Ubuntu 22.04 runner.
 # APPIMAGETOOL, APPIMAGE_RUNTIME and CHROMIUM_ZIP: already downloaded
 # appimagetool, AppImage runtime and Chromium (chrome-linux.zip) files,
-# instead of fetching them.
+# instead of fetching them. BUILD_CA_CERT: a CA bundle to trust for those
+# downloads (behind a TLS-inspecting proxy).
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,6 +23,12 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage"
 RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64"
+OPENCONNECT_VERSION=9.21
+OPENCONNECT_URL="https://www.infradead.org/openconnect/download/openconnect-$OPENCONNECT_VERSION.tar.gz"
+OPENCONNECT_SHA256=5b32369467db6e5f317aa1ed12cfcbb81ed00bdbc765450b6bfcbdc300944a58
+VPNC_SCRIPTS_COMMIT=ce9e961bd0f6b867e1c7c35f78f6fb973f6ff101
+VPNC_SCRIPT_SHA256=f0c4d936a382f07711263242699b5e2d85d1ace37136bb78785d352997c17742
+VPNC_COPYING_SHA256=8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643
 
 if [ "${TERMITE_BUILD_HERE:-0}" != 1 ]; then
   engine="$(command -v podman || command -v docker || true)"
@@ -32,8 +41,13 @@ if [ "${TERMITE_BUILD_HERE:-0}" != 1 ]; then
   [ -z "${APPIMAGE_RUNTIME:-}" ] || mounts+=(-v "$(readlink -f "$APPIMAGE_RUNTIME"):/tools/runtime:ro" -e APPIMAGE_RUNTIME=/tools/runtime)
   [ -z "${CHROMIUM_ZIP:-}" ] || mounts+=(-v "$(readlink -f "$CHROMIUM_ZIP"):/tools/chrome-linux.zip:ro" -e CHROMIUM_ZIP=/tools/chrome-linux.zip)
   [ -z "${CHROMIUM_POSITION:-}" ] || mounts+=(-e CHROMIUM_POSITION="$CHROMIUM_POSITION")
+  [ -z "${BUILD_CA_CERT:-}" ] || mounts+=(-v "$(readlink -f "$BUILD_CA_CERT"):/tools/ca.crt:ro" -e BUILD_CA_CERT=/tools/ca.crt)
   exec "$engine" run --rm -e TERMITE_BUILD_HERE=1 -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "${mounts[@]}" ubuntu:22.04 /src/packaging/build-appimage.sh /out
+fi
+
+if [ -n "${BUILD_CA_CERT:-}" ]; then
+  export CURL_CA_BUNDLE="$BUILD_CA_CERT" SSL_CERT_FILE="$BUILD_CA_CERT"
 fi
 
 . /etc/os-release
@@ -48,7 +62,8 @@ $SUDO apt-get install -y -qq --no-install-recommends \
   librsvg2-common libgdk-pixbuf2.0-bin adwaita-icon-theme libglib2.0-bin libgtk-4-bin \
   libharfbuzz-gobject0 gsettings-desktop-schemas dconf-gsettings-backend shared-mime-info xkb-data desktop-file-utils ca-certificates curl file \
   unzip binutils libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 libxkbcommon0 \
-  libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxext6 libxshmfence1 libasound2 libpango-1.0-0 libcairo2 libdbus-1-3 >/dev/null
+  libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxext6 libxshmfence1 libasound2 libpango-1.0-0 libcairo2 libdbus-1-3 \
+  build-essential pkg-config libssl-dev libxml2-dev zlib1g-dev liblz4-dev patchelf >/dev/null
 
 ARCH_LIB=/usr/lib/x86_64-linux-gnu
 PY="$(readlink -f /usr/bin/python3)" # python3.10
@@ -137,9 +152,11 @@ done
 # with user namespaces instead (sso.browser_args).
 CHROME="$LIB/chromium"
 zip="${CHROMIUM_ZIP:-}"
+chromium_snapshot="${CHROMIUM_POSITION:-unknown}"
 if [ -z "$zip" ]; then
   zip="$WORK/chrome-linux.zip"
-  echo "build-appimage: Chromium snapshot (position, stable version): $(python3 "$SRC/packaging/fetch-chromium.py" "$zip")"
+  chromium_snapshot="$(python3 "$SRC/packaging/fetch-chromium.py" "$zip")"
+  echo "build-appimage: Chromium snapshot (position, stable version): $chromium_snapshot"
 fi
 unzip -q "$zip" -d "$WORK/chromium"
 mv "$WORK/chromium/chrome-linux" "$CHROME"
@@ -169,6 +186,50 @@ while [ "${#cqueue[@]}" -gt 0 ]; do
 done
 missing="$(LD_LIBRARY_PATH="$DEPS:$CHROME" ldd "$CHROME/chrome" | grep 'not found' || true)"
 [ -z "$missing" ] || { echo "build-appimage: Chromium needs libraries that aren't installed: $missing" >&2; exit 1; }
+
+# OpenConnect, for connecting without NetworkManager's plugin. Ubuntu
+# 22.04's (8.20) predates the single sign-on cookie Termite uses, so it is
+# built here. It runs as root, which can't read the AppImage's mount:
+# Termite streams this directory to it (termite.tunnel), so everything it
+# needs is in it, and RUNPATH ($ORIGIN) finds its libraries without an
+# LD_LIBRARY_PATH that vpnc-script's programs would inherit.
+OC="$LIB/openconnect"
+mkdir -p "$OC/lib" "$WORK/oc"
+curl -fsSL -o "$WORK/oc/src.tar.gz" "$OPENCONNECT_URL"
+echo "$OPENCONNECT_SHA256  $WORK/oc/src.tar.gz" | sha256sum -c --quiet
+curl -fsSL -o "$OC/vpnc-script" "https://gitlab.com/openconnect/vpnc-scripts/-/raw/$VPNC_SCRIPTS_COMMIT/vpnc-script"
+echo "$VPNC_SCRIPT_SHA256  $OC/vpnc-script" | sha256sum -c --quiet
+chmod 755 "$OC/vpnc-script"
+tar -xzf "$WORK/oc/src.tar.gz" -C "$WORK/oc"
+(
+  cd "$WORK/oc/openconnect-$OPENCONNECT_VERSION"
+  ./configure --prefix=/opt/openconnect --with-openssl --without-gnutls --disable-nls --disable-docs \
+    --without-libproxy --without-stoken --without-libpskc --without-libpcsclite --without-gssapi \
+    --without-libseccomp --without-tss2 --with-vpnc-script=/bin/false >"$WORK/oc/configure.log" 2>&1 ||
+    { tail -20 "$WORK/oc/configure.log" >&2; exit 1; }
+  make -j"$(nproc)" >"$WORK/oc/make.log" 2>&1 || { tail -20 "$WORK/oc/make.log" >&2; exit 1; }
+  make install DESTDIR="$WORK/oc/root" >/dev/null
+)
+cp "$WORK/oc/root/opt/openconnect/sbin/openconnect" "$OC/openconnect"
+strip "$OC/openconnect"
+declare -A oseen
+oqueue=("$OC/openconnect")
+while [ "${#oqueue[@]}" -gt 0 ]; do
+  f="${oqueue[0]}"
+  oqueue=("${oqueue[@]:1}")
+  while read -r name path; do
+    [ -n "$path" ] && [ -f "$path" ] || continue
+    [ -z "${oseen[$name]:-}" ] || continue
+    oseen[$name]=1
+    case " $glibc " in *" $name "*) continue ;; esac
+    cp -L "$path" "$OC/lib/$name"
+    strip "$OC/lib/$name" 2>/dev/null || true
+    oqueue+=("$OC/lib/$name")
+  done < <(LD_LIBRARY_PATH="$WORK/oc/root/opt/openconnect/lib" ldd "$f" 2>/dev/null | sed -n 's/^\s*\(\S*\) => \(\S*\) .*/\1 \2/p')
+done
+patchelf --set-rpath '$ORIGIN/lib' "$OC/openconnect"
+for f in "$OC"/lib/*; do patchelf --set-rpath '$ORIGIN' "$f"; done
+echo "build-appimage: $("$OC/openconnect" --version | head -1)"
 
 # The settings schemas GTK and libadwaita read: their own and GNOME's
 # desktop ones (fonts, style, ...).
@@ -203,6 +264,42 @@ cp "$SRC/data/io.github.tahuffman1s.Termite.desktop" "$SRC/termite/data/io.githu
 ln -s io.github.tahuffman1s.Termite.svg "$APPDIR/.DirIcon"
 install -m755 "$SRC/packaging/AppRun" "$APPDIR/AppRun"
 install -Dm644 "$SRC/packaging/fonts.conf" "$APPDIR/etc/fonts/fonts.conf"
+
+# Licenses, and where the sources are. Ubuntu's copyright files for every
+# package something here comes from; Chromium's license (its third-party
+# notices are at chrome://credits in it); OpenConnect's source tarball
+# (LGPL) and vpnc-script, which is its own source (GPL).
+LIC="$APPDIR/usr/share/licenses"
+mkdir -p "$LIC/ubuntu" "$LIC/chromium" "$LIC/openconnect" "$LIC/vpnc-script"
+cp "$SRC/LICENSE" "$LIC/termite.LICENSE"
+patterns=$(find "$APPDIR/usr" -type f \( -name '*.so*' -o -name '*.typelib' \) -printf '*/%f\n' | sort -u)
+pkgs="$( { dpkg -S $patterns 2>/dev/null || true; } | cut -d: -f1 | tr ',' '\n' | tr -d ' ')
+python3.10 libpython3.10-stdlib libpython3.10-minimal python3-gi python3-cryptography adwaita-icon-theme hicolor-icon-theme
+xkb-data shared-mime-info gsettings-desktop-schemas libgtk-4-common dconf-gsettings-backend libgdk-pixbuf2.0-bin"
+pkgs="$(sort -u <<<"$pkgs" | grep -v '^$')"
+for pkg in $pkgs; do
+  [ -f "/usr/share/doc/$pkg/copyright" ] && cp -L "/usr/share/doc/$pkg/copyright" "$LIC/ubuntu/$pkg.copyright"
+done
+cp "$SRC/packaging/licenses/chromium-LICENSE" "$LIC/chromium/LICENSE"
+cp "$WORK/oc/openconnect-$OPENCONNECT_VERSION/COPYING.LGPL" "$LIC/openconnect/"
+cp "$WORK/oc/src.tar.gz" "$LIC/openconnect/openconnect-$OPENCONNECT_VERSION.tar.gz"
+curl -fsSL -o "$LIC/vpnc-script/COPYING" "https://gitlab.com/openconnect/vpnc-scripts/-/raw/$VPNC_SCRIPTS_COMMIT/COPYING"
+echo "$VPNC_COPYING_SHA256  $LIC/vpnc-script/COPYING" | sha256sum -c --quiet
+{
+  echo "# What Termite's AppImage contains, and where the sources are"
+  echo
+  echo "- Termite $VERSION (MIT): https://github.com/tahuffman1s/termite"
+  echo "- Chromium $("$CHROME/chrome" --version | awk '{print $2}') (BSD-3-Clause; third-party notices at chrome://credits),"
+  echo "  the chromium-browser-snapshots build at position ${chromium_snapshot%% *}:"
+  echo "  https://chromium.googlesource.com/chromium/src (the position is a main-branch commit)"
+  echo "- OpenConnect $OPENCONNECT_VERSION (LGPL-2.1): its source is openconnect/openconnect-$OPENCONNECT_VERSION.tar.gz here,"
+  echo "  built with packaging/build-appimage.sh from the Termite repository"
+  echo "- vpnc-script (GPL-2.0), the script itself: https://gitlab.com/openconnect/vpnc-scripts/-/tree/$VPNC_SCRIPTS_COMMIT"
+  echo "- From Ubuntu 22.04, unchanged (their copyright files are in ubuntu/; the sources are"
+  echo "  at https://launchpad.net/ubuntu/+source/<source package>/<version>):"
+  echo
+  dpkg-query -W -f='  - ${Package} ${Version} (source: ${source:Package})\n' $pkgs 2>/dev/null || true
+} >"$LIC/SOURCES.md"
 
 # Byte-compiled up front: the AppImage is read-only when it runs.
 PYTHONHOME="$APPDIR/usr" LD_LIBRARY_PATH="$LIB:$LIB/fallback" "$APPDIR/usr/bin/python3" -s -m compileall -q -j0 "$LIB/python$PYVER" "$DIST" >/dev/null

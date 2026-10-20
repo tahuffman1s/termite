@@ -254,10 +254,13 @@ def strap_keypair():
 
 
 def openconnect_version():
-    # Present ourselves exactly as the openconnect that runs the tunnel does;
-    # the gateway only offers SSO to user agents that say "AnyConnect".
-    path = which("openconnect", sbin=True)
-    if path:
+    # Present ourselves as the openconnect that runs the tunnel does (the
+    # system's, else the AppImage's); the gateway only offers SSO to user
+    # agents that say "AnyConnect".
+    bundled = os.path.join(os.environ.get("TERMITE_OPENCONNECT_DIR", ""), "openconnect")
+    for path in (which("openconnect", sbin=True), bundled if os.access(bundled, os.X_OK) else None):
+        if not path:
+            continue
         try:
             out = subprocess.run([path, "--version"], capture_output=True, text=True, env=host_env()).stdout
             m = re.search(r"OpenConnect version (\S+)", out)
@@ -265,7 +268,7 @@ def openconnect_version():
                 return m.group(1)
         except OSError:
             pass
-    return "v9.12"
+    return "v9.21"
 
 
 class Gateway:

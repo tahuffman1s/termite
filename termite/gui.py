@@ -11,7 +11,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import APP_ID, __version__, config, sso, tunnel  # noqa: E402
+from . import APP_ID, __version__, config, sso, tray, tunnel  # noqa: E402
 
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", f"{APP_ID}.svg")
 
@@ -209,6 +209,23 @@ class Window(Adw.ApplicationWindow):
 
     def toast(self, msg):
         self.toasts.add_toast(Adw.Toast(title=msg, timeout=5))
+        if not self.get_visible():
+            # In the tray: a notification instead.
+            note = Gio.Notification.new("Termite")
+            note.set_body(msg)
+            self.get_application().send_notification(None, note)
+
+    def sync_tray(self):
+        app = self.get_application()
+        if app is None or getattr(app, "tray", None) is None:
+            return
+        if self.busy:
+            tip = self.state_label.get_label()
+        elif self.up:
+            tip = f"Connected to {self.cfg['gateway']}" if self.cfg["gateway"] else "Connected"
+        else:
+            tip = "Not connected"
+        app.tray.update(self.up, self.busy, tip)
 
     def selected_browser(self):
         if not self.browser_paths:
@@ -259,6 +276,7 @@ class Window(Adw.ApplicationWindow):
         self.connect_button.add_css_class("destructive-action" if up else "suggested-action")
         for row in (self.gateway_row, self.group_row, self.method_row, self.nm_row):
             row.set_sensitive(not up)
+        self.sync_tray()
 
     def set_busy(self, busy, label=""):
         self.busy = busy
@@ -271,6 +289,7 @@ class Window(Adw.ApplicationWindow):
         if busy:
             self.state_label.set_label(label)
             self.title.set_subtitle(label)
+            self.sync_tray()
         else:
             self.browser_row.set_sensitive(bool(self.browser_paths))
             for row in self.setup_rows:
@@ -421,6 +440,11 @@ class Window(Adw.ApplicationWindow):
 
     def on_close(self, *_):
         self.read_settings()
+        app = self.get_application()
+        if getattr(app, "tray", None) is not None and app.tray.available:
+            # To the tray: Termite keeps running (and the tunnel with it).
+            self.set_visible(False)
+            return True
         if self.tunnel is not None and not self.tunnel.persistent and self.tunnel.is_up():
             # The openconnect tunnel lives in this process: keep it, hide the
             # window; opening Termite again brings it back.
@@ -437,6 +461,7 @@ class App(Adw.Application):
         flags = getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE)
         super().__init__(application_id=APP_ID, flags=flags)
         self.window = None
+        self.tray = None
         for name, fn in (("about", self.on_about), ("quit", self.on_quit)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", fn)
@@ -450,6 +475,11 @@ class App(Adw.Application):
             css.load_from_data(CSS)
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             self.window = Window(self)
+            try:
+                self.tray = tray.Tray(APP_ID, "Termite", LOGO, self.tray_activate, self.tray_toggle, self.on_quit)
+            except GLib.Error as e:
+                print(f"termite: no tray icon: {e.message}", file=sys.stderr)
+            self.window.sync_tray()
         self.window.present()
         seconds = os.environ.get("TERMITE_SELFTEST")
         if seconds:
@@ -477,6 +507,27 @@ class App(Adw.Application):
                 website=kw["website"],
                 license_type=kw["license_type"],
             ).present()
+
+    def tray_activate(self):
+        """Left click: the window, or away with it."""
+        w = self.window
+        if w.get_visible() and w.is_active():
+            w.set_visible(False)
+        else:
+            w.present()
+
+    def tray_toggle(self):
+        """The menu's Connect / Disconnect (and middle click)."""
+        w = self.window
+        if w.busy:
+            return
+        if w.up:
+            w.disconnect_vpn()
+        elif not w.cfg["gateway"]:
+            w.present()
+            w.toast("Enter the VPN address first")
+        else:
+            w.connect_vpn()
 
     def on_quit(self, *_):
         w = self.window

@@ -303,6 +303,57 @@ class Bundled(Base):
         self.assertIn(f"--user-data-dir={os.path.join(self.tmp, 'data', 'termite', 'chromium-builtin')}", args)
 
 
+class BundledOpenConnect(Base):
+    """The AppImage's openconnect, streamed to the root script."""
+
+    def setUp(self):
+        super().setUp()
+        bundle = os.path.join(self.tmp, "bundle")
+        os.makedirs(os.path.join(bundle, "lib"))
+        for name in ("openconnect", "vpnc-script"):
+            with open(os.path.join(bundle, name), "w") as f:
+                f.write(read(os.path.join(FAKES, "openconnect")))
+            os.chmod(os.path.join(bundle, name), 0o755)
+        self.run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(self.run_dir)
+        os.environ.update(TERMITE_OPENCONNECT_DIR=bundle, TERMITE_RUN_DIR=self.run_dir)
+        self.system = tunnel.system_openconnect
+        tunnel.system_openconnect = lambda: None
+
+    def tearDown(self):
+        tunnel.system_openconnect = self.system
+        super().tearDown()
+
+    def test_up_down(self):
+        self.assertTrue(tunnel.OpenConnect.available())
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        self.assertEqual(t.label, "openconnect (built in)")
+        t.ensure("vpn.example.com", lambda m: None)
+        t.up(SESSION_DICT, lambda m: None)
+        self.assertTrue(t.is_up())
+        args = read(os.path.join(self.tmp, "args"))
+        self.assertIn("--script=" + self.run_dir, args)
+        self.assertIn("--protocol=anyconnect --useragent=AnyConnect --cookie-on-stdin --servercert=ab12 https://vpn.example.com/", args)
+        self.assertEqual(read(os.path.join(self.tmp, "cookie")).strip(), SESSION_DICT["cookie"])
+        self.assertEqual(len(os.listdir(self.run_dir)), 1)
+        time.sleep(0.5)  # the fake tunnel's SIGINT handler is up
+        t.down()
+        self.assertFalse(t.is_up())
+        self.assertEqual(os.listdir(self.run_dir), [])  # cleaned up
+
+    def test_old_system_openconnect_is_passed_over(self):
+        tunnel.system_openconnect = self.system
+        old = os.path.join(self.tmp, "old")
+        os.makedirs(old)
+        with open(os.path.join(old, "openconnect"), "w") as f:
+            f.write("#!/bin/sh\necho 'OpenConnect version v8.20-1'\n")
+        os.chmod(os.path.join(old, "openconnect"), 0o755)
+        os.environ["PATH"] = f"{old}:{os.environ['PATH']}"
+        self.assertIsNone(tunnel.system_openconnect())
+        self.assertEqual(tunnel.OpenConnect().label, "openconnect (built in)")
+
+
 class Config(Base):
     def test_roundtrip(self):
         cfg = config.load()
