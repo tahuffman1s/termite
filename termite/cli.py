@@ -5,7 +5,7 @@ import json
 import sys
 import time
 
-from . import __version__, config, sso, tunnel
+from . import __version__, config, dns, sso, tunnel
 
 
 def log(msg):
@@ -14,7 +14,7 @@ def log(msg):
 
 def settings(args):
     cfg = config.load()
-    for key in ("gateway", "group", "browser", "backend", "connection"):
+    for key in ("gateway", "group", "browser", "backend", "connection", "dns"):
         value = getattr(args, key, None)
         if value:
             cfg[key] = value
@@ -32,8 +32,14 @@ def cmd_connect(args):
             log(f"already connected ({t.label})")
             return
         t.ensure(cfg["gateway"], log)
+        if cfg["dns"] == "gateway":
+            t.forget_dns(log)
         session = sso.sign_in(cfg["gateway"], cfg["group"], cfg["browser"] or None, log=log)
         t.up(session, log)
+        if cfg["dns"] != "gateway":
+            note = dns.mitigate(t, cfg["gateway"], session, log)
+            if note:
+                log(note)
     except (sso.SignInError, tunnel.TunnelError) as e:
         raise SystemExit(f"termite: {e}")
     if t.persistent:
@@ -115,6 +121,7 @@ def main(argv=None):
         sp.add_argument("--browser", help="path of a Chromium-based browser")
         sp.add_argument("--backend", choices=["auto", "networkmanager", "openconnect"])
         sp.add_argument("--connection", help="NetworkManager connection name")
+        sp.add_argument("--dns", choices=["fastest", "gateway"], help="after connecting, put the VPN's DNS server that answers fastest first (the default), or leave the gateway's order")
         return sp
 
     sub.add_parser("gui", help="open the window (the default)")

@@ -20,6 +20,7 @@ import subprocess
 import tarfile
 import threading
 
+from . import dns
 from .sso import host_env, which
 
 
@@ -157,20 +158,75 @@ class NetworkManager:
         if r.returncode != 0 and self.is_up():
             raise TunnelError(last_line(r.stderr))
 
+    def dns_servers(self):
+        """The DNS servers the active connection has, the VPN's (and any
+        the profile adds, which come first)."""
+        try:
+            out = run([self.nmcli, "-g", "IP4.DNS,IP6.DNS", "connection", "show", self.connection], timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        servers = []
+        for line in out.splitlines():
+            for server in line.split("|"):
+                server = server.strip()
+                if server and server not in servers:
+                    servers.append(server)
+        return servers
+
+    def prefer_dns(self, server, session, log):
+        """The server as the connection's own DNS (ipv4.dns or ipv6.dns,
+        which NetworkManager puts before the gateway's), which takes on
+        activation: so down and up again, with the same session. True when
+        done; False when the profile could not be changed (the tunnel
+        stays); TunnelError when it did not come back up."""
+        key = "ipv6.dns" if ":" in server else "ipv4.dns"
+        r = run([self.nmcli, "connection", "modify", self.connection, key, server])
+        if r.returncode != 0:
+            log(f"DNS: could not set {key} of '{self.connection}': {last_line(r.stderr)}")
+            return False
+        log(f"DNS: {key} of '{self.connection}' is now {server}, which NetworkManager puts first; reconnecting for it to take")
+        try:
+            self.down()
+        except TunnelError as e:
+            log(f"DNS: could not reconnect ({e}); it takes from the next connection")
+            return False
+        try:
+            self.up(session, log)
+        except TunnelError as e:
+            raise TunnelError(f"{e}; the DNS change is saved, so connect again")
+        return True
+
+    def forget_dns(self, log):
+        """Any DNS server prefer_dns() gave the connection, taken away
+        again (the dns setting says: as the gateway gives them)."""
+        try:
+            out = run([self.nmcli, "-g", "ipv4.dns,ipv6.dns", "connection", "show", self.connection], timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if not out.strip():
+            return
+        r = run([self.nmcli, "connection", "modify", self.connection, "ipv4.dns", "", "ipv6.dns", ""])
+        if r.returncode != 0:
+            log(f"DNS: could not take the DNS servers of '{self.connection}' away: {last_line(r.stderr)}")
+        else:
+            log(f"DNS: '{self.connection}' has no DNS servers of its own again")
+
 
 # Run as root. Reads from stdin the cookie, then the size of the bundled
 # OpenConnect directory and that directory as a tar (0 and nothing when the
 # system's openconnect is in the arguments): root can't read the AppImage's
 # mount, so it comes this way, into a directory only root can write to.
 # Starts openconnect in the background (it returns once the tunnel is up),
-# says "connected" on stdout, then waits for a line (or the end) of stdin,
-# or a signal, and stops it. Holding the stop on stdin means the tunnel
-# never outlives the app.
+# says "connected" on stdout, then takes lines from stdin: "resolv TEXT"
+# writes TEXT (one line, newlines as \n, for printf %b) to the resolv.conf
+# named as the second argument and answers "ok" or "failed"; any other
+# line, the end of stdin, or a signal stops the tunnel. Holding the stop on
+# stdin means the tunnel never outlives the app.
 OPENCONNECT_SCRIPT = r"""
 # Where the tools are, NixOS's included (for this and vpnc-script).
 PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:/run/current-system/sw/bin:/run/current-system/sw/sbin"
 export PATH
-pidfile=$1; shift
+pidfile=$1; resolvconf=$2; shift 2
 IFS= read -r cookie || exit 2
 IFS= read -r size || exit 2
 dir=
@@ -193,7 +249,12 @@ stop() {
 }
 trap stop INT TERM HUP
 echo connected
-read -r _ || true
+while IFS= read -r line; do
+  case "$line" in
+    "resolv "*) printf '%b' "${line#resolv }" >"$resolvconf" && echo ok || echo failed ;;
+    *) break ;;
+  esac
+done
 stop
 """
 
@@ -325,7 +386,7 @@ class OpenConnect:
         how, prefix = self.elevation() or (self.elevate, [self.elevate])
         log(f"starting {self.label} as root (through {how})")
         self.proc = subprocess.Popen(
-            [*prefix, "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, *cmd],
+            [*prefix, "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, dns.RESOLV_CONF, *cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -360,6 +421,36 @@ class OpenConnect:
                 raise TunnelError("the administrator password was not given")
             raise TunnelError(errors[-1] if errors else f"openconnect did not start ({status or 'no output'})")
         self.connected = True
+
+    def dns_servers(self):
+        """The nameservers of /etc/resolv.conf when vpnc-script wrote it
+        (its mark says so; then they are the VPN's and nothing else's),
+        else nothing: a resolvconf or resolved setup is its own business."""
+        text, servers = dns.read_resolv_conf()
+        return servers if text.startswith("#@VPNC_GENERATED@") else []
+
+    def prefer_dns(self, server, session, log):
+        """resolv.conf with the server first, written by the root helper;
+        vpnc-script puts the original back on disconnect as before."""
+        text, _ = dns.read_resolv_conf()
+        new = dns.reorder(text, server)
+        if new == text or self.proc is None:
+            return False
+        try:
+            self.proc.stdin.write(f"resolv {dns.shell_line(new)}\n".encode())
+            self.proc.stdin.flush()
+            answer = self.proc.stdout.readline().decode(errors="replace").strip()
+        except (BrokenPipeError, ValueError, OSError):
+            answer = ""
+        if answer != "ok":
+            log(f"DNS: could not write {dns.RESOLV_CONF}")
+            return False
+        log(f"DNS: {server} is now first in {dns.RESOLV_CONF}")
+        return True
+
+    def forget_dns(self, log):
+        """Nothing to take back: vpnc-script writes resolv.conf anew on
+        every connection."""
 
     def down(self):
         if self.proc is None:

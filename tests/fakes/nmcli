@@ -7,6 +7,9 @@ case "$*" in
   "-t -f NAME connection show") cat "$FAKE_NM/connections" 2>/dev/null ;;
   "-t -f NAME connection show --active") cat "$FAKE_NM/active" 2>/dev/null ;;
   "-g vpn.service-type connection show "*) echo org.freedesktop.NetworkManager.openconnect ;;
+  "-g IP4.DNS,IP6.DNS connection show "*) cat "$FAKE_NM/dns" 2>/dev/null ;;
+  "-g ipv4.dns,ipv6.dns connection show "*) cat "$FAKE_NM/pin" 2>/dev/null ;;
+  "connection modify Termite ipv4.dns "*) [ $# -eq 5 ] && echo "$5" >"$FAKE_NM/pin" || : >"$FAKE_NM/pin" ;;
   "connection add "*) echo "Termite" >>"$FAKE_NM/connections" ;;
   "--wait 120 connection up "*)
     eval "f=\${$#}"

@@ -11,6 +11,7 @@ DEFAULTS = {
     "browser": "",  # path of a Chromium-based browser; blank to pick one
     "backend": "auto",  # auto | networkmanager | openconnect
     "connection": "Termite",  # NetworkManager connection name
+    "dns": "fastest",  # fastest: after connecting, the VPN's DNS server that answers fastest first | gateway: as given
     "menu": "yes",  # the AppImage's icon and menu entry (integrate): yes | no
 }
 

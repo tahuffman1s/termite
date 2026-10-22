@@ -13,7 +13,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
-from . import APP_ID, __version__, config, integrate, sso, tray, tunnel  # noqa: E402
+from . import APP_ID, __version__, config, dns, integrate, sso, tray, tunnel  # noqa: E402
 
 if (Adw.get_major_version(), Adw.get_minor_version()) < (1, 6):
     raise SystemExit(f"termite: needs libadwaita 1.6 or newer, not {Adw.get_major_version()}.{Adw.get_minor_version()} (the AppImage has it)")
@@ -304,16 +304,23 @@ class Window(Adw.ApplicationWindow):
         self.set_busy(True, "Signing In…")
         self.log(f"--- connecting to {cfg['gateway']}")
         cancel = self.cancel
+        notes = []  # what the DNS check has to say
 
         def work():
             t = tunnel.choose(cfg)
             self.log(f"connecting with {t.label}")
             t.ensure(cfg["gateway"], self.log)
+            if cfg["dns"] == "gateway":
+                t.forget_dns(self.log)
             session = sso.sign_in(cfg["gateway"], cfg["group"], cfg["browser"] or None, log=self.log, cancel=cancel)
             if cancel.is_set():
                 raise sso.Cancelled()
             GLib.idle_add(lambda: self.connecting() and False)
             t.up(session, self.log)
+            if cfg["dns"] != "gateway":
+                note = dns.mitigate(t, cfg["gateway"], session, self.log)
+                if note:
+                    notes.append(note)
             return t
 
         def done(t, error):
@@ -325,6 +332,9 @@ class Window(Adw.ApplicationWindow):
                 self.refresh_state(True)
                 if not self.get_visible():
                     self.notify(f"Connected to {cfg['gateway']}")
+                for note in notes:
+                    self.log(note)
+                    self.toast(note)
                 return
             self.refresh_state(False)
             if isinstance(error, sso.Cancelled):
@@ -452,6 +462,14 @@ class Preferences(Adw.PreferencesDialog):
         self.nm_row.connect("changed", lambda r: self.set("connection", r.get_text().strip() or "Termite"))
         group.add(self.method_row)
         group.add(self.nm_row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(title="DNS")
+        row = Adw.SwitchRow(title="Prefer the DNS Server That Answers",
+                            subtitle="After connecting, try the VPN’s DNS servers and put the one that answers fastest first",
+                            active=cfg["dns"] != "gateway")  # fmt: skip
+        row.connect("notify::active", lambda r, *_: self.set("dns", "fastest" if r.get_active() else "gateway"))
+        group.add(row)
         page.add(group)
 
         if integrate.appimage():

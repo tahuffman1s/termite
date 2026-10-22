@@ -33,6 +33,9 @@ brings up the tunnel.
   VPN shows in your network menu
 - 🐜 **Tray icon**: see at a glance whether you're connected; connect and
   disconnect from the menu
+- 🩺 **DNS that answers**: after connecting, the VPN's DNS servers are each
+  sent a query, and the one that answers fastest goes first, so a dead one
+  can't hold up every lookup for five seconds
 - 🎨 **A proper GNOME app**: current GTK 4 and libadwaita, light and dark,
   adaptive down to phone size
 - 🐧 **Any distribution**: Ubuntu, Debian, Fedora, Arch, openSUSE, NixOS…
