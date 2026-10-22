@@ -52,6 +52,13 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.5.1" date="2026-10-22">
+      <description>
+        <p>The DNS check asks each server for an outside name as well as the gateway's,
+        so a server that answers only the company's names, and drops the rest, no
+        longer comes first.</p>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-10-22">
       <description>
         <p>After connecting, the VPN's DNS servers are each sent a query, and the one
