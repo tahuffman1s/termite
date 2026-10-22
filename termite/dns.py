@@ -1,13 +1,17 @@
-"""The VPN's DNS servers, once the tunnel is up: each one gets a query,
-and the one that answers fastest goes first.
+"""The VPN's DNS servers, once the tunnel is up: each one gets two
+queries, and the one that answers them best goes first.
 
 glibc's resolver tries the nameservers in /etc/resolv.conf in order, and
 gives each one five seconds before moving on. A gateway that hands out a
 server that doesn't answer (it pings, but nothing listens on port 53) makes
 every lookup wait those five seconds, and programs with short timeouts of
-their own fail outright. So after connecting, Termite sends every server the
-VPN gave a query (in parallel, two seconds at most), and when the first one
-doesn't answer, or another answers clearly faster, puts the best one first:
+their own fail outright. A split-horizon server does the same for part of
+the world: it answers the company's names and stays silent, rather than
+saying "refused", on everyone else's. So after connecting, Termite sends
+every server the VPN gave two queries (in parallel, two seconds at most):
+the gateway's own name, and an outside one. A server that answers both
+comes before one that answers only one, then the faster; and when the best
+one isn't the first, it goes first:
 openconnect's resolv.conf gets reordered through the root helper, and a
 NetworkManager connection gets the server as its own DNS (ipv4.dns, which
 NetworkManager puts before the gateway's), then reconnects for it to take.
@@ -24,6 +28,7 @@ import threading
 import time
 
 RESOLV_CONF = "/etc/resolv.conf"
+EXTERNAL = "example.com"  # the outside name; any answer counts, even "no such name"
 PORT = 53
 TIMEOUT = 2.0  # seconds a server gets to answer, with a second query half-way
 STEP = 0.1  # servers that answer within this much of each other keep the gateway's order
@@ -40,8 +45,15 @@ def hostname(gateway):
     try:
         ipaddress.ip_address(host)
     except ValueError:
-        return host or "example.com"
-    return "example.com"
+        return host or EXTERNAL
+    return EXTERNAL
+
+
+def names(gateway):
+    """What to ask every server: the gateway's name (one the company's
+    servers know) and an outside one."""
+    inside = hostname(gateway)
+    return [inside, EXTERNAL] if inside != EXTERNAL else [EXTERNAL]
 
 
 def query(name):
@@ -85,30 +97,44 @@ def probe(server, name, timeout=None, port=None):
         return None
 
 
-def check(servers, name):
-    """Every server probed at once: [(server, seconds or None)], in order."""
-    results = [None] * len(servers)
+def check(servers, names):
+    """Every server asked every name, all at once:
+    [(server, [(name, seconds or None), ...])], in the servers' order."""
+    results = [[None] * len(names) for _ in servers]
 
-    def one(i, server):
-        results[i] = probe(server, name)
+    def one(i, j):
+        results[i][j] = probe(servers[i], names[j])
 
-    threads = [threading.Thread(target=one, args=(i, s), daemon=True) for i, s in enumerate(servers)]
+    threads = [threading.Thread(target=one, args=(i, j), daemon=True) for i in range(len(servers)) for j in range(len(names))]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    return list(zip(servers, results))
+    return [(server, list(zip(names, times))) for server, times in zip(servers, results)]
 
 
 def fastest(results):
-    """The server that answered fastest, the gateway's order deciding
-    between ones within STEP of each other; None when none answered."""
-    answered = [(round(seconds / STEP), i, server) for i, (server, seconds) in enumerate(results) if seconds is not None]
-    return min(answered)[2] if answered else None
+    """The server that answered the most names, then the one whose slowest
+    answer came soonest, the gateway's order deciding between ones within
+    STEP of each other; None when none answered anything."""
+    ranked = []
+    for i, (server, answers) in enumerate(results):
+        times = [seconds for _, seconds in answers if seconds is not None]
+        if times:
+            ranked.append((len(answers) - len(times), round(max(times) / STEP), i, server))
+    return min(ranked)[3] if ranked else None
+
+
+def unanswered(answers):
+    return [name for name, seconds in answers if seconds is None]
 
 
 def describe(results):
-    return ", ".join(f"{server} {seconds * 1000:.0f} ms" if seconds is not None else f"{server} no answer" for server, seconds in results)
+    """One line: "10.0.0.1: vpn.example.com 22 ms, example.com no answer; 10.0.0.2: ..." """
+    return "; ".join(
+        f"{server}: " + ", ".join(f"{name} {seconds * 1000:.0f} ms" if seconds is not None else f"{name} no answer" for name, seconds in answers)
+        for server, answers in results
+    )
 
 
 def read_resolv_conf(path=None):
@@ -162,14 +188,14 @@ def mitigate(t, gateway, session, log):
     if not servers:
         log("DNS: the VPN's servers aren't in /etc/resolv.conf directly; leaving DNS alone")
         return None
-    results = check(servers, hostname(gateway))
+    results = check(servers, names(gateway))
     log(f"DNS: {describe(results)}")
     best = fastest(results)
-    dead = [server for server, seconds in results if seconds is None]
     if best is None:
-        return f"No DNS server of the VPN answers ({', '.join(dead)})"
+        return f"No DNS server of the VPN answers ({', '.join(servers)})"
     if best == servers[0]:
         return None
     if not t.prefer_dns(best, session, log):
         return None
-    return f"Using DNS server {best} first" + (f"; {', '.join(dead)} not answering" if dead else "")
+    silent = [f"{server} no answer for {', '.join(unanswered(answers))}" for server, answers in results if server != best and unanswered(answers)]
+    return f"Using DNS server {best} first" + ("; " + "; ".join(silent) if silent else "")

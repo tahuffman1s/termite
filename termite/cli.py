@@ -121,7 +121,7 @@ def main(argv=None):
         sp.add_argument("--browser", help="path of a Chromium-based browser")
         sp.add_argument("--backend", choices=["auto", "networkmanager", "openconnect"])
         sp.add_argument("--connection", help="NetworkManager connection name")
-        sp.add_argument("--dns", choices=["fastest", "gateway"], help="after connecting, put the VPN's DNS server that answers fastest first (the default), or leave the gateway's order")
+        sp.add_argument("--dns", choices=["fastest", "gateway"], help="after connecting, put the VPN's DNS server that answers best first (the default), or leave the gateway's order")
         return sp
 
     sub.add_parser("gui", help="open the window (the default)")

@@ -466,7 +466,7 @@ class Preferences(Adw.PreferencesDialog):
 
         group = Adw.PreferencesGroup(title="DNS")
         row = Adw.SwitchRow(title="Prefer the DNS Server That Answers",
-                            subtitle="After connecting, try the VPN’s DNS servers and put the one that answers fastest first",
+                            subtitle="After connecting, ask the VPN’s DNS servers for a company name and an outside one, and put the one that answers best first",
                             active=cfg["dns"] != "gateway")  # fmt: skip
         row.connect("notify::active", lambda r, *_: self.set("dns", "fastest" if r.get_active() else "gateway"))
         group.add(row)

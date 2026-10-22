@@ -408,9 +408,10 @@ options ndots:1
 
 
 class Dns(Base):
-    """Three DNS servers on loopback: one that answers (127.0.0.1), one that
-    listens but never answers (127.0.0.2), and a port nobody listens on
-    (127.0.0.3)."""
+    """Four DNS servers on loopback: one that answers (127.0.0.1), one that
+    listens but never answers (127.0.0.2), a port nobody listens on
+    (127.0.0.3), and a split-horizon one that answers names starting with
+    "vpn" and stays silent on the rest (127.0.0.4)."""
 
     def setUp(self):
         super().setUp()
@@ -419,8 +420,11 @@ class Dns(Base):
         self.port = self.answering.getsockname()[1]
         self.silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.silent.bind(("127.0.0.2", self.port))
+        self.split = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.split.bind(("127.0.0.4", self.port))
         self.questions = []
-        threading.Thread(target=self.serve, daemon=True).start()
+        threading.Thread(target=self.serve, args=(self.answering, lambda q: True), daemon=True).start()
+        threading.Thread(target=self.serve, args=(self.split, lambda q: q[12:].startswith(b"\x03vpn")), daemon=True).start()
         self.saved_dns = dns.PORT, dns.TIMEOUT, dns.RESOLV_CONF, dns.local
         dns.PORT, dns.TIMEOUT = self.port, 0.6
         dns.RESOLV_CONF = os.path.join(self.tmp, "resolv.conf")
@@ -429,18 +433,19 @@ class Dns(Base):
 
     def tearDown(self):
         dns.PORT, dns.TIMEOUT, dns.RESOLV_CONF, dns.local = self.saved_dns
-        self.answering.close()
-        self.silent.close()
+        for sock in (self.answering, self.silent, self.split):
+            sock.close()
         super().tearDown()
 
-    def serve(self):
+    def serve(self, sock, answers):
         while True:
             try:
-                data, peer = self.answering.recvfrom(512)
+                data, peer = sock.recvfrom(512)
             except OSError:
                 return
             self.questions.append(data)
-            self.answering.sendto(data[:2] + b"\x81\x80" + data[4:], peer)  # the question back, as an answer
+            if answers(data):
+                sock.sendto(data[:2] + b"\x81\x80" + data[4:], peer)  # the question back, as an answer
 
     def resolv_conf(self, *servers, text=RESOLV_CONF):
         with open(dns.RESOLV_CONF, "w") as f:
@@ -450,6 +455,8 @@ class Dns(Base):
         self.assertIsNotNone(dns.probe("127.0.0.1", "vpn.example.com"))
         self.assertLess(dns.probe("127.0.0.1", "vpn.example.com"), 0.5)
         self.assertIsNone(dns.probe("127.0.0.2", "vpn.example.com"))
+        self.assertIsNotNone(dns.probe("127.0.0.4", "vpn.example.com"))
+        self.assertIsNone(dns.probe("127.0.0.4", "example.com"))
         start = time.monotonic()
         self.assertIsNone(dns.probe("127.0.0.3", "vpn.example.com"))
         self.assertLess(time.monotonic() - start, 0.5)  # port unreachable: no waiting
@@ -458,16 +465,25 @@ class Dns(Base):
         self.assertIn(packet[12:], self.questions[0])
 
     def test_fastest(self):
-        self.assertEqual(dns.fastest([("a", None), ("b", 0.004), ("c", 0.002)]), "b")  # within a step: the gateway's order
-        self.assertEqual(dns.fastest([("a", 0.9), ("b", 0.004)]), "b")
-        self.assertIsNone(dns.fastest([("a", None), ("b", None)]))
-        self.assertEqual(dns.describe([("a", None), ("b", 0.0042)]), "a no answer, b 4 ms")
+        def results(*times):
+            return [(server, [("in", a), ("out", b)]) for server, (a, b) in zip("abcd", times)]
+
+        self.assertEqual(dns.fastest(results((None, None), (0.004, 0.005), (0.002, 0.003))), "b")  # within a step: the gateway's order
+        self.assertEqual(dns.fastest(results((0.9, 0.9), (0.004, 0.005))), "b")
+        self.assertEqual(dns.fastest(results((0.022, None), (0.049, 0.049))), "b")  # both answered beats faster
+        self.assertEqual(dns.fastest(results((0.022, None), (None, None))), "a")  # one answered beats none
+        self.assertEqual(dns.fastest(results((0.004, 0.9), (0.049, 0.049))), "b")  # the slowest answer counts
+        self.assertIsNone(dns.fastest(results((None, None), (None, None))))
+        self.assertEqual(dns.describe(results((None, 0.0042), (0.022, 0.0491))), "a: in no answer, out 4 ms; b: in 22 ms, out 49 ms")
+        self.assertEqual(dns.unanswered([("in", None), ("out", 0.1)]), ["in"])
 
     def test_hostname(self):
         self.assertEqual(dns.hostname("https://vpn.example.com:443/path"), "vpn.example.com")
         self.assertEqual(dns.hostname("vpn.example.com"), "vpn.example.com")
         self.assertEqual(dns.hostname("https://10.0.0.1/"), "example.com")
         self.assertEqual(dns.hostname("[2001:db8::1]:443"), "example.com")
+        self.assertEqual(dns.names("vpn.example.com"), ["vpn.example.com", "example.com"])
+        self.assertEqual(dns.names("10.0.0.1"), ["example.com"])
 
     def test_reorder(self):
         text = RESOLV_CONF.format("10.0.0.1", "10.0.0.2")
@@ -484,15 +500,29 @@ class Dns(Base):
         self.assertEqual(t.dns_servers(), ["127.0.0.2", "127.0.0.1"])
         lines = []
         note = dns.mitigate(t, "https://vpn.example.com/", SESSION_DICT, lines.append)
-        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 not answering")
+        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
         self.assertEqual(read(dns.RESOLV_CONF), RESOLV_CONF.format("127.0.0.1", "127.0.0.2"))  # the mark and the rest kept
-        self.assertRegex(" ".join(lines), r"127\.0\.0\.2 no answer, 127\.0\.0\.1 \d+ ms")
+        self.assertRegex(" ".join(lines), r"127\.0\.0\.2: vpn\.example\.com no answer, example\.com no answer; 127\.0\.0\.1: vpn\.example\.com \d+ ms, example\.com \d+ ms")
         self.assertTrue(t.is_up())
         # Again: the first one answers now, so nothing to do.
         self.assertIsNone(dns.mitigate(t, "https://vpn.example.com/", SESSION_DICT, lines.append))
         time.sleep(0.5)
         t.down()
         self.assertFalse(t.is_up())
+
+    def test_split_horizon_server_that_drops_outside_names_goes_second(self):
+        # The first answers the company's names only, and silently drops the rest.
+        self.resolv_conf("127.0.0.4", "127.0.0.1")
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        lines = []
+        note = dns.mitigate(t, "https://vpn.example.com/", SESSION_DICT, lines.append)
+        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.4 no answer for example.com")
+        self.assertEqual(read(dns.RESOLV_CONF), RESOLV_CONF.format("127.0.0.1", "127.0.0.4"))
+        self.assertRegex(" ".join(lines), r"127\.0\.0\.4: vpn\.example\.com \d+ ms, example\.com no answer")
+        time.sleep(0.5)
+        t.down()
 
     def test_openconnect_leaves_other_resolv_confs_alone(self):
         self.resolv_conf("127.0.0.2", "127.0.0.1", text="# Generated by NetworkManager\nnameserver {}\nnameserver {}\n")
@@ -514,7 +544,7 @@ class Dns(Base):
         self.assertEqual(t.dns_servers(), ["127.0.0.2", "127.0.0.1"])
         lines = []
         note = dns.mitigate(t, "vpn.example.com", SESSION_DICT, lines.append)
-        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 not answering")
+        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
         calls = read(os.path.join(self.tmp, "calls")).splitlines()
         i = calls.index("connection modify Termite ipv4.dns 127.0.0.1")
         self.assertEqual(calls[i + 1], "connection down Termite")
