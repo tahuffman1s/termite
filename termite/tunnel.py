@@ -216,14 +216,17 @@ class NetworkManager:
 # OpenConnect directory and that directory as a tar (0 and nothing when the
 # system's openconnect is in the arguments): root can't read the AppImage's
 # mount, so it comes this way, into a directory only root can write to.
-# Starts openconnect in the background (it returns once the tunnel is up)
-# with a wrapper around vpnc-script (the bundled one, or the one named as
-# the third argument) that keeps what it was told about DNS, says what
-# that was ("dns SERVER...") and "connected" on stdout, then takes lines
-# from stdin: "dns SERVER..." puts the VPN's DNS servers in that order
-# wherever vpnc-script put them and answers "ok" or "failed"; any other
-# line, the end of stdin, or a signal stops the tunnel. Holding the stop on
-# stdin means the tunnel never outlives the app.
+# Starts openconnect in the background with a wrapper around vpnc-script
+# (the bundled one, or the one named as the third argument) that keeps
+# what it was told about DNS once it has set the tunnel up. openconnect
+# --background returns as soon as the session is up, before the tunnel
+# device and vpnc-script (both come after the fork, in its main loop): so
+# the helper waits for the wrapper's record, ten seconds at most, then
+# says what it holds ("dns SERVER...") and "connected" on stdout, and
+# takes lines from stdin: "dns SERVER..." puts the VPN's DNS servers in
+# that order wherever vpnc-script put them and answers "ok" or "failed";
+# any other line, the end of stdin, or a signal stops the tunnel. Holding
+# the stop on stdin means the tunnel never outlives the app.
 OPENCONNECT_SCRIPT = r"""
 # Where the tools are, NixOS's included (for this and vpnc-script).
 PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:/run/current-system/sw/bin:/run/current-system/sw/sbin"
@@ -239,14 +242,16 @@ if [ "$size" -gt 0 ]; then
   set -- "$dir/openconnect" "$@"
 fi
 if [ -n "$script" ]; then
-  # Around vpnc-script: on connect, what it was told about DNS (for
-  # dns_apply), then the script itself, with everything it was given.
+  # Around vpnc-script: the script itself, with everything it was given,
+  # then, once it has connected (routes and DNS in place), what it was
+  # told about DNS, for the wait below and dns_apply.
   printf '%s\n' "$script" >"$dir/real"
   cat >"$dir/script" <<'EOF'
 #!/bin/sh
 d=$(dirname "$0")
-[ "$reason" = connect ] && printf '%s\n' "$TUNDEV" "$INTERNAL_IP4_DNS" "$INTERNAL_IP6_DNS" "$CISCO_DEF_DOMAIN" >"$d/dns"
-exec "$(cat "$d/real")" "$@"
+"$(cat "$d/real")" "$@"; s=$?
+[ "$reason" = connect ] && printf '%s\n' "$TUNDEV" "$INTERNAL_IP4_DNS" "$INTERNAL_IP6_DNS" "$CISCO_DEF_DOMAIN" >"$d/dns.new" && mv -f "$d/dns.new" "$d/dns"
+exit $s
 EOF
   chmod 755 "$dir/script"
   oc=$1; shift
@@ -283,9 +288,14 @@ stop() {
 }
 trap stop INT TERM HUP
 TUNDEV= DNS4= DNS6= DOMAIN=
+if [ -n "$script" ]; then
+  # Until vpnc-script has run (or openconnect has given up).
+  n=0
+  while [ ! -e "$dir/dns" ] && [ "$n" -lt 100 ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+fi
 if [ -r "$dir/dns" ]; then
   { IFS= read -r TUNDEV; IFS= read -r DNS4; IFS= read -r DNS6; IFS= read -r DOMAIN; } <"$dir/dns"
-  echo "dns $DNS4 $DNS6"
+  [ -z "$DNS4$DNS6" ] || echo "dns $DNS4 $DNS6"
 fi
 echo connected
 while IFS= read -r line; do
@@ -463,16 +473,20 @@ class OpenConnect:
         self.dns = []
         while True:
             status = self.proc.stdout.readline().decode(errors="replace").strip()
-            if not status.startswith("dns "):
+            if status.split()[:1] != ["dns"]:
                 break
             self.dns = status.split()[1:]
         if status != "connected":
-            self.proc.wait()
-            self.proc.stdout.close()
+            # The end of stdin stops the helper, should it still be waiting on it.
             try:
                 self.proc.stdin.close()
-            except BrokenPipeError:
+            except (BrokenPipeError, OSError):
                 pass
+            try:
+                self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+            self.proc.stdout.close()
             self.proc = None
             if how != "sudo" and status == "" and not errors:
                 raise TunnelError("the administrator password was not given")

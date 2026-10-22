@@ -91,7 +91,7 @@ class Base(unittest.TestCase):
         # The fake pkexec, even where a real setuid one is installed.
         self.elevator = tunnel.elevator
         tunnel.elevator = lambda name: os.path.join(FAKES, name)
-        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "FAKE_OC_DNS", "APPIMAGE"):
+        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "FAKE_OC_DNS", "FAKE_OC_SCRIPT_DELAY", "APPIMAGE"):
             os.environ.pop(var, None)
 
     def tearDown(self):
@@ -593,6 +593,21 @@ class Dns(Base):
         self.assertEqual(read(os.path.join(self.tmp, "resolvconf.calls")), "-a tun9\n")
         self.assertEqual(read(os.path.join(self.tmp, "resolvconf.record")), "nameserver 127.0.0.1\nnameserver 127.0.0.2\nsearch corp.example.com\n")
         self.assertEqual(dns.read_resolv_conf()[1], ["127.0.0.2", "127.0.0.1"])  # resolvconf's own file, left to it
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_waits_for_vpnc_script(self):
+        # openconnect --background returns before vpnc-script has run: the helper waits for it.
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        os.environ["FAKE_OC_SCRIPT_DELAY"] = "1.5"
+        self.resolv_conf("127.0.0.2", "127.0.0.1", text="nameserver {}\nnameserver {}\n")
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        start = time.monotonic()
+        t.up(SESSION_DICT, lambda m: None)
+        self.assertGreater(time.monotonic() - start, 1.0)
+        self.assertEqual(t.dns_servers(), ["127.0.0.2", "127.0.0.1"])
+        self.assertEqual(read(os.path.join(self.tmp, "script")), "connect tun9 127.0.0.2 127.0.0.1\n")
         time.sleep(0.5)
         t.down()
 

@@ -1,9 +1,10 @@
 #!/bin/sh
 # A stand-in for openconnect: with --version, says which, and which
 # vpnc-script is its default; otherwise reads the cookie, "connects" (a
-# sleeping process standing in for the tunnel), runs the --script it was
-# given as vpnc-script would be run on connect when FAKE_OC_DNS names the
-# DNS servers, and returns, as --background does.
+# sleeping process standing in for the tunnel) and returns, as --background
+# does; the --script it was given runs as vpnc-script would on connect,
+# with the DNS servers FAKE_OC_DNS names, after that (FAKE_OC_SCRIPT_DELAY
+# seconds later), as the real one's does.
 [ "$1" = --version ] && {
   echo "OpenConnect version v9.99-fake"
   echo "Default vpnc-script (override with --script): $(dirname "$0")/vpnc-script"
@@ -15,10 +16,11 @@ echo "$cookie" >"$FAKE_OC/cookie"
 [ -n "${FAKE_OC_FAIL:-}" ] && { echo "Failed to connect: $FAKE_OC_FAIL" >&2; exit 1; }
 script=
 for a; do case "$a" in --pid-file=*) pidfile="${a#--pid-file=}" ;; --script=*) script="${a#--script=}" ;; esac; done
-if [ -n "$script" ] && [ -n "${FAKE_OC_DNS:-}" ]; then
-  reason=connect TUNDEV=tun9 INTERNAL_IP4_DNS="$FAKE_OC_DNS" INTERNAL_IP6_DNS= CISCO_DEF_DOMAIN=corp.example.com "$script" </dev/null
-fi
 # (Python, since a background job of sh can't catch SIGINT, as openconnect does.)
 python3 -c 'import signal, sys, time; signal.signal(signal.SIGINT, lambda *a: sys.exit(0)); time.sleep(1000)' >/dev/null 2>&1 </dev/null &
 echo $! >"$pidfile"
+if [ -n "$script" ]; then
+  # As the real one: the script runs after --background has returned, FAKE_OC_SCRIPT_DELAY seconds later.
+  ( sleep "${FAKE_OC_SCRIPT_DELAY:-0}"; reason=connect TUNDEV=tun9 INTERNAL_IP4_DNS="${FAKE_OC_DNS:-}" INTERNAL_IP6_DNS= CISCO_DEF_DOMAIN=corp.example.com "$script" ) </dev/null >/dev/null 2>&1 &
+fi
 echo "Connected as 10.0.0.2 (fake)" >&2
