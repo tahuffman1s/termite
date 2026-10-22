@@ -5,6 +5,7 @@ import base64
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -81,6 +82,7 @@ class Base(unittest.TestCase):
             "FAKE_BROWSER_LOG": os.path.join(self.tmp, "browser.log"),
             "FAKE_NM": self.tmp,
             "FAKE_OC": self.tmp,
+            "TERMITE_RUN_DIR": self.tmp,  # the root helper's /run, for a user
             "XDG_CONFIG_HOME": os.path.join(self.tmp, "config"),
             "XDG_DATA_HOME": os.path.join(self.tmp, "data"),
         }
@@ -238,7 +240,7 @@ class OpenConnectTunnel(Base):
         args = read(os.path.join(self.tmp, "args"))
         self.assertIn("--cookie-on-stdin --servercert=ab12 https://vpn.example.com/ --background --pid-file=", args)
         self.assertNotIn("webvpn", args)  # the cookie never goes on the command line
-        self.assertRegex(args, r"^--script=/run/termite-openconnect\.\w+/script --protocol=anyconnect ")  # around the system's vpnc-script
+        self.assertRegex(args, rf"^--script={re.escape(self.tmp)}/termite-openconnect\.\w+/script --protocol=anyconnect ")  # around the system's vpnc-script
         self.assertEqual(t.script, os.path.join(FAKES, "vpnc-script"))
         pid = int(read(t.pidfile))
         time.sleep(0.5)  # the fake tunnel's SIGINT handler is up
