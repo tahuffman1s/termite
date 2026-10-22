@@ -677,6 +677,7 @@ def debug_info(cfg):
         "networkmanager": tunnel.NetworkManager.available(),
         "networkmanager_openconnect_plugin": tunnel.NetworkManager.plugin_installed(),
         "openconnect": tunnel.system_openconnect() or tunnel.bundled_openconnect(),
+        "vpnc_script": tunnel.OpenConnect().script or ("bundled" if tunnel.bundled_openconnect() else ""),
         "no_new_privs": tunnel.no_new_privs(),
         "settings": {k: v for k, v in cfg.items() if k != "gateway"},
     }

@@ -12,9 +12,11 @@ every server the VPN gave two queries (in parallel, two seconds at most):
 the gateway's own name, and an outside one. A server that answers both
 comes before one that answers only one, then the faster; and when the best
 one isn't the first, it goes first:
-openconnect's resolv.conf gets reordered through the root helper, and a
-NetworkManager connection gets the server as its own DNS (ipv4.dns, which
-NetworkManager puts before the gateway's), then reconnects for it to take.
+with openconnect, the root helper puts the servers back in that order
+wherever vpnc-script put them (resolv.conf, systemd-resolved's link or
+resolvconf), and a NetworkManager connection gets the server as its own DNS
+(ipv4.dns, which NetworkManager puts before the gateway's), then reconnects
+for it to take.
 
 Nothing happens when a local resolver (systemd-resolved, dnsmasq) stands in
 front of the servers: those try the next one by themselves."""
@@ -155,27 +157,6 @@ def local(server):
         return False
 
 
-def reorder(text, first):
-    """The resolv.conf text with `first` as the first nameserver, the other
-    nameserver lines following in their order and all else as it was."""
-    servers = [line.split()[1] for line in text.splitlines() if line.split()[:1] == ["nameserver"] and len(line.split()) > 1]
-    if first not in servers:
-        return text
-    order = iter([first] + [s for s in servers if s != first])
-    lines = []
-    for line in text.splitlines(keepends=True):
-        if line.split()[:1] == ["nameserver"] and len(line.split()) > 1:
-            line = f"nameserver {next(order)}\n"
-        lines.append(line)
-    return "".join(lines)
-
-
-def shell_line(text):
-    """The text as one line for the root helper, which prints it back
-    with printf %b."""
-    return text.replace("\\", "\\\\").replace("\n", "\\n")
-
-
 def mitigate(t, gateway, session, log):
     """After t.up(): probes the VPN's DNS servers and puts the best first.
     Returns a word for the user when something was done or found wrong,
@@ -186,7 +167,7 @@ def mitigate(t, gateway, session, log):
         return None
     servers = t.dns_servers()
     if not servers:
-        log("DNS: the VPN's servers aren't in /etc/resolv.conf directly; leaving DNS alone")
+        log("DNS: no servers from the VPN were seen; leaving DNS alone")
         return None
     results = check(servers, names(gateway))
     log(f"DNS: {describe(results)}")

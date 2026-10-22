@@ -99,6 +99,7 @@ def cmd_info(args):
         "networkmanager": tunnel.NetworkManager.available(),
         "networkmanager_openconnect_plugin": tunnel.NetworkManager.plugin_installed(),
         "openconnect": tunnel.system_openconnect() or tunnel.bundled_openconnect(),
+        "vpnc_script": tunnel.OpenConnect().script or ("bundled" if tunnel.bundled_openconnect() else ""),
         "root_through": (tunnel.OpenConnect().elevation() or ["nothing usable"])[0],
         "no_new_privs": tunnel.no_new_privs(),
         "bundled_chromium": sso.bundled_browser(),

@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in for vpnc-script: notes what it was called for.
+echo "$reason $TUNDEV $INTERNAL_IP4_DNS" >>"$FAKE_OC/script"

@@ -216,26 +216,60 @@ class NetworkManager:
 # OpenConnect directory and that directory as a tar (0 and nothing when the
 # system's openconnect is in the arguments): root can't read the AppImage's
 # mount, so it comes this way, into a directory only root can write to.
-# Starts openconnect in the background (it returns once the tunnel is up),
-# says "connected" on stdout, then takes lines from stdin: "resolv TEXT"
-# writes TEXT (one line, newlines as \n, for printf %b) to the resolv.conf
-# named as the second argument and answers "ok" or "failed"; any other
+# Starts openconnect in the background (it returns once the tunnel is up)
+# with a wrapper around vpnc-script (the bundled one, or the one named as
+# the third argument) that keeps what it was told about DNS, says what
+# that was ("dns SERVER...") and "connected" on stdout, then takes lines
+# from stdin: "dns SERVER..." puts the VPN's DNS servers in that order
+# wherever vpnc-script put them and answers "ok" or "failed"; any other
 # line, the end of stdin, or a signal stops the tunnel. Holding the stop on
 # stdin means the tunnel never outlives the app.
 OPENCONNECT_SCRIPT = r"""
 # Where the tools are, NixOS's included (for this and vpnc-script).
 PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:/run/current-system/sw/bin:/run/current-system/sw/sbin"
 export PATH
-pidfile=$1; resolvconf=$2; shift 2
+pidfile=$1; resolvconf=$2; script=$3; shift 3
 IFS= read -r cookie || exit 2
 IFS= read -r size || exit 2
-dir=
+dir=$(mktemp -d "${TERMITE_RUN_DIR:-/run}/termite-openconnect.XXXXXX") || exit 2
+cleanup() { rm -rf "$dir"; rm -f "$pidfile"; }
 if [ "$size" -gt 0 ]; then
-  dir=$(mktemp -d "${TERMITE_RUN_DIR:-/run}/termite-openconnect.XXXXXX") || exit 2
-  head -c "$size" | tar -x -f - -C "$dir" || { rm -rf "$dir"; exit 2; }
-  set -- "$dir/openconnect" --script="$dir/vpnc-script" "$@"
+  head -c "$size" | tar -x -f - -C "$dir" || { cleanup; exit 2; }
+  script=$dir/vpnc-script
+  set -- "$dir/openconnect" "$@"
 fi
-cleanup() { [ -z "$dir" ] || rm -rf "$dir"; rm -f "$pidfile"; }
+if [ -n "$script" ]; then
+  # Around vpnc-script: on connect, what it was told about DNS (for
+  # dns_apply), then the script itself, with everything it was given.
+  printf '%s\n' "$script" >"$dir/real"
+  cat >"$dir/script" <<'EOF'
+#!/bin/sh
+d=$(dirname "$0")
+[ "$reason" = connect ] && printf '%s\n' "$TUNDEV" "$INTERNAL_IP4_DNS" "$INTERNAL_IP6_DNS" "$CISCO_DEF_DOMAIN" >"$d/dns"
+exec "$(cat "$d/real")" "$@"
+EOF
+  chmod 755 "$dir/script"
+  oc=$1; shift
+  set -- "$oc" --script="$dir/script" "$@"
+fi
+# The VPN's DNS servers in the order given ($@), put where vpnc-script put
+# them: the tunnel's link in systemd-resolved, its resolvconf record, or
+# the nameserver lines of resolv.conf itself (the ones that are the VPN's,
+# where they are; any others stay).
+dns_apply() {
+  if [ -n "$TUNDEV" ] && command -v resolvectl >/dev/null 2>&1 && resolvectl dns "$TUNDEV" 2>/dev/null | grep -q -F " $1"; then
+    resolvectl dns "$TUNDEV" "$@"
+  elif [ -n "$TUNDEV" ] && command -v resolvconf >/dev/null 2>&1 && { [ -e "${TERMITE_RUN_DIR:-/run}/resolvconf/interface/$TUNDEV" ] || [ -e "${TERMITE_RUN_DIR:-/run}/resolvconf/interfaces/$TUNDEV" ]; }; then
+    { for s; do echo "nameserver $s"; done; [ -z "$DOMAIN" ] || echo "search $DOMAIN"; } | resolvconf -a "$TUNDEV"
+  else
+    tmp=$(mktemp "$dir/resolv.XXXXXX") || return 1
+    awk -v order="$*" '
+      BEGIN { n = split(order, want, " "); for (i = 1; i <= n; i++) ours[want[i]] = 1 }
+      $1 == "nameserver" && ($2 in ours) { if (!done) { for (i = 1; i <= n; i++) print "nameserver " want[i]; done = 1 }; next }
+      { print }' "$resolvconf" >"$tmp" && grep -q -F "nameserver $1" "$tmp" && cat "$tmp" >"$resolvconf"
+    s=$?; rm -f "$tmp"; return $s
+  fi
+}
 printf '%s\n' "$cookie" | "$@" --background --pid-file="$pidfile" >&2 || { s=$?; cleanup; echo "failed $s"; exit 1; }
 stop() {
   pid=$(cat "$pidfile" 2>/dev/null)
@@ -248,10 +282,15 @@ stop() {
   exit 0
 }
 trap stop INT TERM HUP
+TUNDEV= DNS4= DNS6= DOMAIN=
+if [ -r "$dir/dns" ]; then
+  { IFS= read -r TUNDEV; IFS= read -r DNS4; IFS= read -r DNS6; IFS= read -r DOMAIN; } <"$dir/dns"
+  echo "dns $DNS4 $DNS6"
+fi
 echo connected
 while IFS= read -r line; do
   case "$line" in
-    "resolv "*) printf '%b' "${line#resolv }" >"$resolvconf" && echo ok || echo failed ;;
+    "dns "*) dns_apply ${line#dns } && echo ok || echo failed ;;
     *) break ;;
   esac
 done
@@ -310,6 +349,17 @@ def system_openconnect():
     return path if m and int(m.group(1)) >= 9 else None
 
 
+def default_script(openconnect):
+    """The vpnc-script the system's openconnect runs by default (--version
+    says), or "" when it doesn't say."""
+    try:
+        out = run([openconnect, "--version"], timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    m = re.search(r"^Default vpnc-script.*: (\S+)$", out, re.M)
+    return m.group(1) if m else ""
+
+
 class OpenConnect:
     label = "openconnect"
     persistent = False
@@ -319,9 +369,11 @@ class OpenConnect:
         self.bundle = None if self.openconnect else bundled_openconnect()
         if self.bundle:
             self.label = "openconnect (built in)"
+        self.script = default_script(self.openconnect) if self.openconnect else ""
         self.elevate = elevate
         self.proc = None
         self.connected = False
+        self.dns = []  # what vpnc-script was given, once up
         self.pidfile = f"/run/termite-{os.getuid()}.pid"
 
     @staticmethod
@@ -386,7 +438,7 @@ class OpenConnect:
         how, prefix = self.elevation() or (self.elevate, [self.elevate])
         log(f"starting {self.label} as root (through {how})")
         self.proc = subprocess.Popen(
-            [*prefix, "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, dns.RESOLV_CONF, *cmd],
+            [*prefix, "/bin/sh", "-c", OPENCONNECT_SCRIPT, "termite", self.pidfile, dns.RESOLV_CONF, self.script, *cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -408,7 +460,12 @@ class OpenConnect:
             self.proc.stdin.flush()
         except BrokenPipeError:
             pass
-        status = self.proc.stdout.readline().decode(errors="replace").strip()
+        self.dns = []
+        while True:
+            status = self.proc.stdout.readline().decode(errors="replace").strip()
+            if not status.startswith("dns "):
+                break
+            self.dns = status.split()[1:]
         if status != "connected":
             self.proc.wait()
             self.proc.stdout.close()
@@ -423,34 +480,36 @@ class OpenConnect:
         self.connected = True
 
     def dns_servers(self):
-        """The nameservers of /etc/resolv.conf when vpnc-script wrote it
-        (its mark says so; then they are the VPN's and nothing else's),
-        else nothing: a resolvconf or resolved setup is its own business."""
+        """The DNS servers vpnc-script was given, as the root helper saw it
+        hand them on; else the nameservers of /etc/resolv.conf when
+        vpnc-script wrote that itself (its mark says so)."""
+        if self.dns:
+            return list(self.dns)
         text, servers = dns.read_resolv_conf()
         return servers if text.startswith("#@VPNC_GENERATED@") else []
 
     def prefer_dns(self, server, session, log):
-        """resolv.conf with the server first, written by the root helper;
-        vpnc-script puts the original back on disconnect as before."""
-        text, _ = dns.read_resolv_conf()
-        new = dns.reorder(text, server)
-        if new == text or self.proc is None:
+        """The VPN's servers with this one first, put back where vpnc-script
+        put them by the root helper (dns_apply there); vpnc-script takes
+        them away again on disconnect as before."""
+        order = [server] + [s for s in self.dns_servers() if s != server]
+        if self.proc is None:
             return False
         try:
-            self.proc.stdin.write(f"resolv {dns.shell_line(new)}\n".encode())
+            self.proc.stdin.write(f"dns {' '.join(order)}\n".encode())
             self.proc.stdin.flush()
             answer = self.proc.stdout.readline().decode(errors="replace").strip()
         except (BrokenPipeError, ValueError, OSError):
             answer = ""
         if answer != "ok":
-            log(f"DNS: could not write {dns.RESOLV_CONF}")
+            log(f"DNS: could not put {server} first: the VPN's servers weren't found in {dns.RESOLV_CONF}, in systemd-resolved or in resolvconf")
             return False
-        log(f"DNS: {server} is now first in {dns.RESOLV_CONF}")
+        log(f"DNS: {server} is now the first of the VPN's servers")
         return True
 
     def forget_dns(self, log):
-        """Nothing to take back: vpnc-script writes resolv.conf anew on
-        every connection."""
+        """Nothing to take back: vpnc-script sets DNS up anew on every
+        connection."""
 
     def down(self):
         if self.proc is None:

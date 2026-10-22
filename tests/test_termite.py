@@ -89,7 +89,7 @@ class Base(unittest.TestCase):
         # The fake pkexec, even where a real setuid one is installed.
         self.elevator = tunnel.elevator
         tunnel.elevator = lambda name: os.path.join(FAKES, name)
-        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "APPIMAGE"):
+        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "FAKE_OC_DNS", "APPIMAGE"):
             os.environ.pop(var, None)
 
     def tearDown(self):
@@ -238,6 +238,8 @@ class OpenConnectTunnel(Base):
         args = read(os.path.join(self.tmp, "args"))
         self.assertIn("--cookie-on-stdin --servercert=ab12 https://vpn.example.com/ --background --pid-file=", args)
         self.assertNotIn("webvpn", args)  # the cookie never goes on the command line
+        self.assertRegex(args, r"^--script=/run/termite-openconnect\.\w+/script --protocol=anyconnect ")  # around the system's vpnc-script
+        self.assertEqual(t.script, os.path.join(FAKES, "vpnc-script"))
         pid = int(read(t.pidfile))
         time.sleep(0.5)  # the fake tunnel's SIGINT handler is up
         t.down()
@@ -317,7 +319,7 @@ class BundledOpenConnect(Base):
         os.makedirs(os.path.join(bundle, "lib"))
         for name in ("openconnect", "vpnc-script"):
             with open(os.path.join(bundle, name), "w") as f:
-                f.write(read(os.path.join(FAKES, "openconnect")))
+                f.write(read(os.path.join(FAKES, name)))
             os.chmod(os.path.join(bundle, name), 0o755)
         self.run_dir = os.path.join(self.tmp, "run")
         os.makedirs(self.run_dir)
@@ -334,11 +336,16 @@ class BundledOpenConnect(Base):
         t = tunnel.OpenConnect("pkexec")
         t.pidfile = os.path.join(self.tmp, "oc.pid")
         self.assertEqual(t.label, "openconnect (built in)")
+        self.assertEqual(t.script, "")
         t.ensure("vpn.example.com", lambda m: None)
+        os.environ["FAKE_OC_DNS"] = "10.0.0.53 10.0.1.53"
         t.up(SESSION_DICT, lambda m: None)
         self.assertTrue(t.is_up())
         args = read(os.path.join(self.tmp, "args"))
         self.assertIn("--script=" + self.run_dir, args)
+        # The wrapper ran the bundled vpnc-script with all it was given, and kept the DNS part.
+        self.assertEqual(read(os.path.join(self.tmp, "script")), "connect tun9 10.0.0.53 10.0.1.53\n")
+        self.assertEqual(t.dns_servers(), ["10.0.0.53", "10.0.1.53"])
         self.assertIn("--protocol=anyconnect --useragent=AnyConnect --cookie-on-stdin --servercert=ab12 https://vpn.example.com/", args)
         self.assertEqual(read(os.path.join(self.tmp, "cookie")).strip(), SESSION_DICT["cookie"])
         self.assertEqual(len(os.listdir(self.run_dir)), 1)
@@ -485,18 +492,18 @@ class Dns(Base):
         self.assertEqual(dns.names("vpn.example.com"), ["vpn.example.com", "example.com"])
         self.assertEqual(dns.names("10.0.0.1"), ["example.com"])
 
-    def test_reorder(self):
-        text = RESOLV_CONF.format("10.0.0.1", "10.0.0.2")
-        self.assertEqual(dns.reorder(text, "10.0.0.2"), RESOLV_CONF.format("10.0.0.2", "10.0.0.1"))
-        self.assertEqual(dns.reorder(text, "10.0.0.1"), text)
-        self.assertEqual(dns.reorder(text, "10.0.0.9"), text)
+    def test_read_resolv_conf(self):
+        self.resolv_conf("10.0.0.1", "10.0.0.2")
+        self.assertEqual(dns.read_resolv_conf(), (RESOLV_CONF.format("10.0.0.1", "10.0.0.2"), ["10.0.0.1", "10.0.0.2"]))
         self.assertEqual(dns.read_resolv_conf(os.path.join(self.tmp, "none")), ("", []))
 
     def test_openconnect_puts_the_answering_server_first(self):
+        # No word from vpnc-script: resolv.conf, which it wrote itself.
         self.resolv_conf("127.0.0.2", "127.0.0.1")
         t = tunnel.OpenConnect("pkexec")
         t.pidfile = os.path.join(self.tmp, "oc.pid")
         t.up(SESSION_DICT, lambda m: None)
+        self.assertEqual(t.dns, [])
         self.assertEqual(t.dns_servers(), ["127.0.0.2", "127.0.0.1"])
         lines = []
         note = dns.mitigate(t, "https://vpn.example.com/", SESSION_DICT, lines.append)
@@ -521,6 +528,82 @@ class Dns(Base):
         self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.4 no answer for example.com")
         self.assertEqual(read(dns.RESOLV_CONF), RESOLV_CONF.format("127.0.0.1", "127.0.0.4"))
         self.assertRegex(" ".join(lines), r"127\.0\.0\.4: vpn\.example\.com \d+ ms, example\.com no answer")
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_servers_from_vpnc_script_in_someone_elses_resolv_conf(self):
+        # resolvconf's, say: the VPN's servers among others, which stay where they are.
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        self.resolv_conf("127.0.0.2", "127.0.0.1", text="# Dynamic resolv.conf(5) file for glibc resolver(3) generated by resolvconf(8)\nnameserver {}\nnameserver {}\nnameserver 192.0.2.53\nsearch corp.example.com\n")
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        self.assertEqual(t.dns_servers(), ["127.0.0.2", "127.0.0.1"])
+        lines = []
+        note = dns.mitigate(t, "https://vpn.example.com/", SESSION_DICT, lines.append)
+        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
+        self.assertEqual(
+            read(dns.RESOLV_CONF),
+            "# Dynamic resolv.conf(5) file for glibc resolver(3) generated by resolvconf(8)\nnameserver 127.0.0.1\nnameserver 127.0.0.2\nnameserver 192.0.2.53\nsearch corp.example.com\n",
+        )
+        self.assertIn("127.0.0.1 is now the first of the VPN's servers", lines[-1])
+        time.sleep(0.5)
+        t.down()
+
+    def fake_tool(self, name, body):
+        """A stand-in for resolvectl or resolvconf, first on PATH, logging what it is called with."""
+        d = os.path.join(self.tmp, "tools")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w") as f:
+            f.write(f"#!/bin/sh\necho \"$*\" >>'{self.tmp}/{name}.calls'\n{body}\n")
+        os.chmod(os.path.join(d, name), 0o755)
+        if not os.environ["PATH"].startswith(d):
+            os.environ["PATH"] = f"{d}:{os.environ['PATH']}"
+
+    def test_openconnect_servers_in_systemd_resolved(self):
+        # vpnc-script gave them to resolved for the tunnel's link: the new order goes there too.
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        self.resolv_conf("127.0.0.2", "127.0.0.1", text="# This is /run/systemd/resolve/resolv.conf managed by man:systemd-resolved(8).\nnameserver {}\nnameserver {}\n")
+        self.fake_tool("resolvectl", '[ "$1 $2" = "dns tun9" ] && [ $# -eq 2 ] && echo "Link 9 (tun9): 127.0.0.2 127.0.0.1"; exit 0')
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        note = dns.mitigate(t, "vpn.example.com", SESSION_DICT, lambda m: None)
+        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
+        self.assertEqual(read(os.path.join(self.tmp, "resolvectl.calls")).splitlines(), ["dns tun9", "dns tun9 127.0.0.1 127.0.0.2"])
+        self.assertEqual(dns.read_resolv_conf()[1], ["127.0.0.2", "127.0.0.1"])  # resolved's own file, left to it
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_servers_in_resolvconf(self):
+        # vpnc-script gave them to resolvconf as the tunnel's record: that record anew, search domain and all.
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        os.environ["TERMITE_RUN_DIR"] = self.tmp
+        os.makedirs(os.path.join(self.tmp, "resolvconf", "interface"))
+        open(os.path.join(self.tmp, "resolvconf", "interface", "tun9"), "w").close()
+        self.resolv_conf("127.0.0.2", "127.0.0.1", text="# Dynamic resolv.conf(5) file for glibc resolver(3) generated by resolvconf(8)\nnameserver {}\nnameserver {}\n")
+        self.fake_tool("resolvconf", f"cat >'{self.tmp}/resolvconf.record'")
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        note = dns.mitigate(t, "vpn.example.com", SESSION_DICT, lambda m: None)
+        self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
+        self.assertEqual(read(os.path.join(self.tmp, "resolvconf.calls")), "-a tun9\n")
+        self.assertEqual(read(os.path.join(self.tmp, "resolvconf.record")), "nameserver 127.0.0.1\nnameserver 127.0.0.2\nsearch corp.example.com\n")
+        self.assertEqual(dns.read_resolv_conf()[1], ["127.0.0.2", "127.0.0.1"])  # resolvconf's own file, left to it
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_servers_not_in_resolv_conf(self):
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        self.resolv_conf("192.0.2.53", "192.0.2.54", text="nameserver {}\nnameserver {}\n")
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        lines = []
+        self.assertIsNone(dns.mitigate(t, "vpn.example.com", SESSION_DICT, lines.append))
+        self.assertIn("could not put 127.0.0.1 first", lines[-1])
+        self.assertEqual(read(dns.RESOLV_CONF), "nameserver 192.0.2.53\nnameserver 192.0.2.54\n")
         time.sleep(0.5)
         t.down()
 
