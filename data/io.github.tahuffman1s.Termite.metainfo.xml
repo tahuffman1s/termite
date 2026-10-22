@@ -52,6 +52,13 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.5.0" date="2026-10-22">
+      <description>
+        <p>After connecting, the VPN's DNS servers are each sent a query, and the one
+        that answers fastest goes first, so a server that doesn't answer can't hold up
+        every lookup. Preferences has a switch for it.</p>
+      </description>
+    </release>
     <release version="1.4.1" date="2026-10-20">
       <description>
         <p>The window shows Termite's icon: the AppImage adds its menu entry and icon,
