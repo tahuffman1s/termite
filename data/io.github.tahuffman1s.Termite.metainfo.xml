@@ -52,6 +52,14 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.5.2" date="2026-10-22">
+      <description>
+        <p>With openconnect, the DNS check now learns the VPN's servers from vpnc-script
+        itself, and puts them in order the way vpnc-script set them up: through
+        systemd-resolved, resolvconf, or resolv.conf. Before, it stood down on systems
+        where vpnc-script doesn't write resolv.conf directly.</p>
+      </description>
+    </release>
     <release version="1.5.1" date="2026-10-22">
       <description>
         <p>The DNS check asks each server for an outside name as well as the gateway's,
