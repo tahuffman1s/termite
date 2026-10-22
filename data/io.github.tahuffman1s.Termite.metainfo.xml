@@ -52,6 +52,13 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.5.3" date="2026-10-22">
+      <description>
+        <p>The DNS check waits for vpnc-script to have set the tunnel up, which happens
+        after openconnect reports the session up; before, it ran too early and saw no
+        servers.</p>
+      </description>
+    </release>
     <release version="1.5.2" date="2026-10-22">
       <description>
         <p>With openconnect, the DNS check now learns the VPN's servers from vpnc-script
