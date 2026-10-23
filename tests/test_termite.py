@@ -356,6 +356,15 @@ class BundledOpenConnect(Base):
         self.assertFalse(t.is_up())
         self.assertEqual(os.listdir(self.run_dir), [])  # cleaned up
 
+    def test_bundled_comes_before_the_systems(self):
+        tunnel.system_openconnect = self.system
+        self.assertEqual(tunnel.system_openconnect(), os.path.join(FAKES, "openconnect"))  # a 9.99 is there
+        t = tunnel.OpenConnect()
+        self.assertEqual(t.label, "openconnect (built in)")
+        self.assertIsNone(t.openconnect)
+        self.assertTrue(t.bundle)
+        self.assertEqual(sso.openconnect_version(), "v9.99-fake")  # the fake stands in for the bundle too (a copy of it)
+
     def test_old_system_openconnect_is_passed_over(self):
         tunnel.system_openconnect = self.system
         old = os.path.join(self.tmp, "old")

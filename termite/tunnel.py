@@ -439,8 +439,15 @@ class OpenConnect:
     persistent = False
 
     def __init__(self, elevate="pkexec"):
-        self.openconnect = system_openconnect()
-        self.bundle = None if self.openconnect else bundled_openconnect()
+        # The AppImage's openconnect first: it is built with STRAP support,
+        # the tunnel's proof that it holds the key the sign-in was tied to,
+        # which a distribution's build may lack (openconnect leaves it out
+        # without HPKE support, and --version doesn't say): then the
+        # gateway answers the tunnel's CONNECT with 401 and openconnect
+        # reports the cookie rejected. The system's only when there is no
+        # bundle (a plain install).
+        self.bundle = bundled_openconnect()
+        self.openconnect = None if self.bundle else system_openconnect()
         if self.bundle:
             self.label = "openconnect (built in)"
         self.script = default_script(self.openconnect) if self.openconnect else ""
@@ -454,7 +461,7 @@ class OpenConnect:
 
     @staticmethod
     def available():
-        return bool(system_openconnect() or bundled_openconnect())
+        return bool(bundled_openconnect() or system_openconnect())
 
     def is_up(self):
         if not (self.connected and self.proc is not None and self.proc.poll() is None):

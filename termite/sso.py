@@ -255,10 +255,10 @@ def strap_keypair():
 
 def openconnect_version():
     # Present ourselves as the openconnect that runs the tunnel does (the
-    # system's, else the AppImage's); the gateway only offers SSO to user
+    # AppImage's, else the system's); the gateway only offers SSO to user
     # agents that say "AnyConnect".
     bundled = os.path.join(os.environ.get("TERMITE_OPENCONNECT_DIR", ""), "openconnect")
-    for path in (which("openconnect", sbin=True), bundled if os.access(bundled, os.X_OK) else None):
+    for path in (bundled if os.access(bundled, os.X_OK) else None, which("openconnect", sbin=True)):
         if not path:
             continue
         try:

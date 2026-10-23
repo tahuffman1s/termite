@@ -121,10 +121,17 @@ switch under **Preferences → DNS** turns this off.
   Chromium, and reads the result over Chromium's DevTools pipe.
 - With NetworkManager's OpenConnect plugin, it hands the session to
   NetworkManager: no password prompt, and the VPN shows in the network menu.
-- Without the plugin, it runs OpenConnect (yours if it's 9.0+, else the bundled
-  9.21) as root, after asking for your password through `pkexec`, or
-  `systemd-run` inside sandboxes like NixOS's `appimage-run`. vpnc-script sets
-  up routes and DNS.
+- Without the plugin, it runs OpenConnect (the bundled 9.21; yours, if 9.0+,
+  only when there is no bundle) as root, after asking for your password
+  through `pkexec`, or `systemd-run` inside sandboxes like NixOS's
+  `appimage-run`. vpnc-script sets up routes and DNS.
+- The tunnel has to prove it holds the key the sign-in was tied to (STRAP),
+  which openconnect only does when built with HPKE support. The bundled one
+  is. If your distribution's isn't, the gateway answers the tunnel with
+  `401 Unauthorized` and openconnect says "Cookie was rejected by server";
+  NetworkManager's plugin always runs the distribution's, so it can't connect
+  then. `strings "$(ldd "$(command -v openconnect)" | grep -o '/[^ ]*libopenconnect[^ ]*')" | grep -c STRAP-Verify`
+  prints 0 for such a build.
 - The built-in Chromium is Google's open-source build from the current Stable
   branch point, refreshed with each Termite release.
 - Closing the window keeps Termite in the tray. Quit from the tray, or with

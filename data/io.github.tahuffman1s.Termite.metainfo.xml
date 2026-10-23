@@ -52,6 +52,15 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.6.1" date="2026-10-23">
+      <description>
+        <p>The bundled OpenConnect runs the tunnel even when the system has one of its own.
+        A distribution's build without HPKE support can't give the gateway the STRAP proof
+        of the sign-in key, so the gateway refused the tunnel (401, "Cookie was rejected
+        by server") as soon as such an openconnect was installed, NetworkManager's
+        plugin for instance pulling one in.</p>
+      </description>
+    </release>
     <release version="1.6.0" date="2026-10-23">
       <description>
         <p>Split DNS: with a split tunnel, the VPN's DNS servers get only the company's
