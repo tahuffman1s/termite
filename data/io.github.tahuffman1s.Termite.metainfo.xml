@@ -52,6 +52,16 @@
     <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <releases>
+    <release version="1.6.0" date="2026-10-23">
+      <description>
+        <p>Split DNS: with a split tunnel, the VPN's DNS servers get only the company's
+        names (the domains the gateway names, any added under Preferences, and the
+        reverse zones of the VPN's networks), and every other name keeps going to the
+        usual DNS, so a VPN server that stops answering can't hold up every lookup.
+        Needs systemd-resolved or NetworkManager's own resolver; the log says when
+        the system's can't do it.</p>
+      </description>
+    </release>
     <release version="1.5.3" date="2026-10-22">
       <description>
         <p>The DNS check waits for vpnc-script to have set the tunnel up, which happens
