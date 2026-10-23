@@ -158,6 +158,40 @@ class NetworkManager:
         if r.returncode != 0 and self.is_up():
             raise TunnelError(last_line(r.stderr))
 
+    def prepare_dns(self, cfg, log):
+        """Before up(): the "domains" setting's domains on the profile as
+        routing domains of its own (ipv4.dns-search, "~" first), which
+        NetworkManager's resolver (systemd-resolved or dnsmasq) sends to the
+        VPN's servers besides the gateway's own; none when split DNS is off.
+        Takes on activation, so it comes before up()."""
+        extra = [] if cfg.get("split_dns") == "no" else dns.extra_domains(cfg)
+        want = ["~" + d for d in extra]
+        try:
+            out = run([self.nmcli, "-g", "ipv4.dns-search", "connection", "show", self.connection], timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if [d.strip() for d in out.strip().split(",") if d.strip()] == want:
+            return
+        r = run([self.nmcli, "connection", "modify", self.connection, "ipv4.dns-search", ",".join(want)])
+        if r.returncode != 0:
+            log(f"DNS: could not set ipv4.dns-search of '{self.connection}': {last_line(r.stderr)}")
+        elif want:
+            log(f"DNS: '{self.connection}' also sends {', '.join(extra)} to the VPN's servers")
+        else:
+            log(f"DNS: '{self.connection}' has no domains of its own again")
+
+    def split_dns(self, extra, log):
+        """NetworkManager keeps the VPN's servers to its domains (and the
+        ones prepare_dns() added) by itself, unless the VPN has the default
+        route, when a resolver of its own (systemd-resolved, dnsmasq)
+        answers this machine: "resolver" then; "none" when resolv.conf lists
+        the servers for every program to ask in turn; "unknown" when it
+        can't be read."""
+        _, resolvers = dns.read_resolv_conf()
+        if not resolvers:
+            return "unknown"
+        return "resolver" if all(map(dns.local, resolvers)) else "none"
+
     def dns_servers(self):
         """The DNS servers the active connection has, the VPN's (and any
         the profile adds, which come first)."""
@@ -218,15 +252,19 @@ class NetworkManager:
 # mount, so it comes this way, into a directory only root can write to.
 # Starts openconnect in the background with a wrapper around vpnc-script
 # (the bundled one, or the one named as the third argument) that keeps
-# what it was told about DNS once it has set the tunnel up. openconnect
-# --background returns as soon as the session is up, before the tunnel
-# device and vpnc-script (both come after the fork, in its main loop): so
-# the helper waits for the wrapper's record, ten seconds at most, then
-# says what it holds ("dns SERVER...") and "connected" on stdout, and
-# takes lines from stdin: "dns SERVER..." puts the VPN's DNS servers in
-# that order wherever vpnc-script put them and answers "ok" or "failed";
-# any other line, the end of stdin, or a signal stops the tunnel. Holding
-# the stop on stdin means the tunnel never outlives the app.
+# what it was told about DNS and routes once it has set the tunnel up.
+# openconnect --background returns as soon as the session is up, before
+# the tunnel device and vpnc-script (both come after the fork, in its main
+# loop): so the helper waits for the wrapper's record, ten seconds at
+# most, then says what it holds ("dns SERVER...", "domains DOMAIN...",
+# "routes ADDR/LEN...") and "connected" on stdout, and takes lines from
+# stdin: "dns SERVER..." puts the VPN's DNS servers in that order wherever
+# vpnc-script put them and answers "ok" or "failed"; "split DOMAIN..."
+# keeps them to those domains (the tunnel's link in systemd-resolved gets
+# the domains and comes off the default route) and answers "ok", "failed"
+# or "none" (no resolver here that routes by domain holds them); any other
+# line, the end of stdin, or a signal stops the tunnel. Holding the stop
+# on stdin means the tunnel never outlives the app.
 OPENCONNECT_SCRIPT = r"""
 # Where the tools are, NixOS's included (for this and vpnc-script).
 PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:/run/current-system/sw/bin:/run/current-system/sw/sbin"
@@ -244,13 +282,20 @@ fi
 if [ -n "$script" ]; then
   # Around vpnc-script: the script itself, with everything it was given,
   # then, once it has connected (routes and DNS in place), what it was
-  # told about DNS, for the wait below and dns_apply.
+  # told about DNS and the split-tunnel routes (none: the VPN takes all
+  # traffic), for the wait below, dns_apply and dns_split.
   printf '%s\n' "$script" >"$dir/real"
   cat >"$dir/script" <<'EOF'
 #!/bin/sh
 d=$(dirname "$0")
 "$(cat "$d/real")" "$@"; s=$?
-[ "$reason" = connect ] && printf '%s\n' "$TUNDEV" "$INTERNAL_IP4_DNS" "$INTERNAL_IP6_DNS" "$CISCO_DEF_DOMAIN" >"$d/dns.new" && mv -f "$d/dns.new" "$d/dns"
+if [ "$reason" = connect ]; then
+  routes=; i=0
+  while [ "$i" -lt "${CISCO_SPLIT_INC:-0}" ]; do eval "routes=\"\$routes \$CISCO_SPLIT_INC_${i}_ADDR/\$CISCO_SPLIT_INC_${i}_MASKLEN\""; i=$((i + 1)); done
+  i=0
+  while [ "$i" -lt "${CISCO_IPV6_SPLIT_INC:-0}" ]; do eval "routes=\"\$routes \$CISCO_IPV6_SPLIT_INC_${i}_ADDR/\$CISCO_IPV6_SPLIT_INC_${i}_MASKLEN\""; i=$((i + 1)); done
+  printf '%s\n' "$TUNDEV" "$INTERNAL_IP4_DNS" "$INTERNAL_IP6_DNS" "$CISCO_DEF_DOMAIN" "$CISCO_SPLIT_DNS" "${routes# }" >"$d/dns.new" && mv -f "$d/dns.new" "$d/dns"
+fi
 exit $s
 EOF
   chmod 755 "$dir/script"
@@ -261,8 +306,11 @@ fi
 # them: the tunnel's link in systemd-resolved, its resolvconf record, or
 # the nameserver lines of resolv.conf itself (the ones that are the VPN's,
 # where they are; any others stay).
+in_resolved() {
+  [ -n "$TUNDEV" ] && command -v resolvectl >/dev/null 2>&1 && resolvectl dns "$TUNDEV" 2>/dev/null | grep -q -F " $1"
+}
 dns_apply() {
-  if [ -n "$TUNDEV" ] && command -v resolvectl >/dev/null 2>&1 && resolvectl dns "$TUNDEV" 2>/dev/null | grep -q -F " $1"; then
+  if in_resolved "$1"; then
     resolvectl dns "$TUNDEV" "$@"
   elif [ -n "$TUNDEV" ] && command -v resolvconf >/dev/null 2>&1 && { [ -e "${TERMITE_RUN_DIR:-/run}/resolvconf/interface/$TUNDEV" ] || [ -e "${TERMITE_RUN_DIR:-/run}/resolvconf/interfaces/$TUNDEV" ]; }; then
     { for s; do echo "nameserver $s"; done; [ -z "$DOMAIN" ] || echo "search $DOMAIN"; } | resolvconf -a "$TUNDEV"
@@ -273,6 +321,19 @@ dns_apply() {
       $1 == "nameserver" && ($2 in ours) { if (!done) { for (i = 1; i <= n; i++) print "nameserver " want[i]; done = 1 }; next }
       { print }' "$resolvconf" >"$tmp" && grep -q -F "nameserver $1" "$tmp" && cat "$tmp" >"$resolvconf"
     s=$?; rm -f "$tmp"; return $s
+  fi
+}
+# The VPN's DNS servers kept to the domains given ($@, "~" first for ones
+# only looked up there): the tunnel's link in systemd-resolved, when that
+# holds them, gets the domains (in place of vpnc-script's) and comes off
+# the default route, so no other name goes there. Nothing else here
+# (resolvconf, resolv.conf itself) can route by domain: "none".
+dns_split() {
+  first=$DNS4; [ -n "$first" ] || first=$DNS6
+  if in_resolved "${first%% *}"; then
+    resolvectl domain "$TUNDEV" "$@" && resolvectl default-route "$TUNDEV" no && echo ok || echo failed
+  else
+    echo none
   fi
 }
 printf '%s\n' "$cookie" | "$@" --background --pid-file="$pidfile" >&2 || { s=$?; cleanup; echo "failed $s"; exit 1; }
@@ -287,20 +348,23 @@ stop() {
   exit 0
 }
 trap stop INT TERM HUP
-TUNDEV= DNS4= DNS6= DOMAIN=
+TUNDEV= DNS4= DNS6= DOMAIN= SPLITDNS= ROUTES=
 if [ -n "$script" ]; then
   # Until vpnc-script has run (or openconnect has given up).
   n=0
   while [ ! -e "$dir/dns" ] && [ "$n" -lt 100 ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
 fi
 if [ -r "$dir/dns" ]; then
-  { IFS= read -r TUNDEV; IFS= read -r DNS4; IFS= read -r DNS6; IFS= read -r DOMAIN; } <"$dir/dns"
+  { IFS= read -r TUNDEV; IFS= read -r DNS4; IFS= read -r DNS6; IFS= read -r DOMAIN; IFS= read -r SPLITDNS; IFS= read -r ROUTES; } <"$dir/dns"
   [ -z "$DNS4$DNS6" ] || echo "dns $DNS4 $DNS6"
+  [ -z "$DOMAIN$SPLITDNS" ] || echo "domains $DOMAIN $(printf '%s' "$SPLITDNS" | tr ',' ' ')"
+  [ -z "$ROUTES" ] || echo "routes $ROUTES"
 fi
 echo connected
 while IFS= read -r line; do
   case "$line" in
     "dns "*) dns_apply ${line#dns } && echo ok || echo failed ;;
+    "split "*) dns_split ${line#split } ;;
     *) break ;;
   esac
 done
@@ -383,7 +447,9 @@ class OpenConnect:
         self.elevate = elevate
         self.proc = None
         self.connected = False
-        self.dns = []  # what vpnc-script was given, once up
+        self.dns = []  # what vpnc-script was given, once up: the DNS servers,
+        self.domains = []  # the default domain and split-DNS list,
+        self.routes = []  # and the split-tunnel routes (none: all traffic)
         self.pidfile = f"/run/termite-{os.getuid()}.pid"
 
     @staticmethod
@@ -470,12 +536,18 @@ class OpenConnect:
             self.proc.stdin.flush()
         except BrokenPipeError:
             pass
-        self.dns = []
+        self.dns, self.domains, self.routes = [], [], []
         while True:
             status = self.proc.stdout.readline().decode(errors="replace").strip()
-            if status.split()[:1] != ["dns"]:
+            words = status.split()
+            if words[:1] == ["dns"]:
+                self.dns = words[1:]
+            elif words[:1] == ["domains"]:
+                self.domains = words[1:]
+            elif words[:1] == ["routes"]:
+                self.routes = words[1:]
+            else:
                 break
-            self.dns = status.split()[1:]
         if status != "connected":
             # The end of stdin stops the helper, should it still be waiting on it.
             try:
@@ -502,6 +574,40 @@ class OpenConnect:
         text, servers = dns.read_resolv_conf()
         return servers if text.startswith("#@VPNC_GENERATED@") else []
 
+    def _ask(self, line):
+        """A line to the root helper, and its answer ("" when it's gone)."""
+        if self.proc is None:
+            return ""
+        try:
+            self.proc.stdin.write(f"{line}\n".encode())
+            self.proc.stdin.flush()
+            return self.proc.stdout.readline().decode(errors="replace").strip()
+        except (BrokenPipeError, ValueError, OSError):
+            return ""
+
+    def prepare_dns(self, cfg, log):
+        """Nothing before up(): split_dns() does it all once vpnc-script has run."""
+
+    def split_dns(self, extra, log):
+        """The VPN's servers kept to the company's names by the root helper
+        (dns_split there): the tunnel's link in systemd-resolved gets the
+        domains and comes off the default route; vpnc-script reverts the
+        link on disconnect as before. "done", or why not: "full" (the VPN
+        takes all traffic), "nodomains", "none" (no resolver that routes by
+        domain holds the servers), "failed", "unknown" (no record)."""
+        if not self.dns:
+            return "unknown"
+        if not self.routes:
+            return "full"
+        domains = dns.split_domains(self.domains, extra, self.routes)
+        if not domains:
+            return "nodomains"
+        answer = self._ask(f"split {' '.join(domains)}")
+        if answer == "ok":
+            log(f"DNS: the VPN's servers get {', '.join(domains)} and no other name")
+            return "done"
+        return "none" if answer == "none" else "failed"
+
     def prefer_dns(self, server, session, log):
         """The VPN's servers with this one first, put back where vpnc-script
         put them by the root helper (dns_apply there); vpnc-script takes
@@ -509,13 +615,7 @@ class OpenConnect:
         order = [server] + [s for s in self.dns_servers() if s != server]
         if self.proc is None:
             return False
-        try:
-            self.proc.stdin.write(f"dns {' '.join(order)}\n".encode())
-            self.proc.stdin.flush()
-            answer = self.proc.stdout.readline().decode(errors="replace").strip()
-        except (BrokenPipeError, ValueError, OSError):
-            answer = ""
-        if answer != "ok":
+        if self._ask(f"dns {' '.join(order)}") != "ok":
             log(f"DNS: could not put {server} first: the VPN's servers weren't found in {dns.RESOLV_CONF}, in systemd-resolved or in resolvconf")
             return False
         log(f"DNS: {server} is now the first of the VPN's servers")

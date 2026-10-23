@@ -310,6 +310,7 @@ class Window(Adw.ApplicationWindow):
             t = tunnel.choose(cfg)
             self.log(f"connecting with {t.label}")
             t.ensure(cfg["gateway"], self.log)
+            t.prepare_dns(cfg, self.log)
             if cfg["dns"] == "gateway":
                 t.forget_dns(self.log)
             session = sso.sign_in(cfg["gateway"], cfg["group"], cfg["browser"] or None, log=self.log, cancel=cancel)
@@ -317,6 +318,9 @@ class Window(Adw.ApplicationWindow):
                 raise sso.Cancelled()
             GLib.idle_add(lambda: self.connecting() and False)
             t.up(session, self.log)
+            note = dns.split(t, cfg, self.log)
+            if note:
+                notes.append(note)
             if cfg["dns"] != "gateway":
                 note = dns.mitigate(t, cfg["gateway"], session, self.log)
                 if note:
@@ -464,7 +468,15 @@ class Preferences(Adw.PreferencesDialog):
         group.add(self.nm_row)
         page.add(group)
 
-        group = Adw.PreferencesGroup(title="DNS")
+        group = Adw.PreferencesGroup(title="DNS", description="Company domains: ones the VPN’s DNS servers know besides those the VPN names itself, separated by spaces")
+        row = Adw.SwitchRow(title="Use the VPN’s DNS for Company Names Only",
+                            subtitle="Other names keep going to this computer’s usual DNS, so a VPN server that stops answering can’t hold up every lookup (needs systemd-resolved, or NetworkManager’s own resolver)",
+                            active=cfg["split_dns"] != "no")  # fmt: skip
+        row.connect("notify::active", lambda r, *_: self.set("split_dns", "yes" if r.get_active() else "no"))
+        group.add(row)
+        self.domains_row = Adw.EntryRow(title="Company Domains", text=cfg["domains"])
+        self.domains_row.connect("changed", lambda r: self.set("domains", r.get_text().strip()))
+        group.add(self.domains_row)
         row = Adw.SwitchRow(title="Prefer the DNS Server That Answers",
                             subtitle="After connecting, ask the VPN’s DNS servers for a company name and an outside one, and put the one that answers best first",
                             active=cfg["dns"] != "gateway")  # fmt: skip

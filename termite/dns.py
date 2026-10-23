@@ -19,10 +19,24 @@ resolvconf), and a NetworkManager connection gets the server as its own DNS
 for it to take.
 
 Nothing happens when a local resolver (systemd-resolved, dnsmasq) stands in
-front of the servers: those try the next one by themselves."""
+front of the servers: those try the next one by themselves.
+
+Before that, split(): with a split tunnel, the VPN's servers are kept to
+the company's names, so no outside lookup ever waits on them. The names
+are the domains the gateway gives (its default domain and split-DNS list,
+search domains), the ones the "domains" setting adds and the reverse zones
+of the VPN's networks (routing-only, "~" first, as systemd-resolved and
+NetworkManager spell them). With openconnect, the root helper gives the
+tunnel's link in systemd-resolved those domains and takes it off the
+default route (vpnc-script leaves it on, so every name went there too);
+NetworkManager does the same by itself when systemd-resolved or dnsmasq
+answers the machine, the added domains going on the profile as its own
+routing domains. Where programs read /etc/resolv.conf directly, nothing
+can route by domain, and the log says so."""
 
 import ipaddress
 import random
+import re
 import select
 import socket
 import struct
@@ -155,6 +169,86 @@ def local(server):
         return ipaddress.ip_address(server.split("%", 1)[0]).is_loopback
     except ValueError:
         return False
+
+
+def extra_domains(cfg):
+    """The domains the "domains" setting adds to the gateway's (space or
+    comma separated), cleaned up."""
+    out = []
+    for d in re.split(r"[\s,]+", cfg.get("domains") or ""):
+        d = d.strip().lstrip("~").strip(".").lower()
+        if d and d not in out:
+            out.append(d)
+    return out
+
+
+def reverse_zones(routes):
+    """The reverse-lookup zones (in-addr.arpa, ip6.arpa) covering the
+    routes (addr/len), on whole octets (nibbles for IPv6), so the VPN's
+    own addresses are looked up there too; one inside a broader one
+    dropped."""
+    zones = []
+    for route in routes:
+        try:
+            net = ipaddress.ip_network(route, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4:
+            parts = str(net.network_address).split(".")[: net.prefixlen // 8]
+            suffix = "in-addr.arpa"
+        else:
+            parts = list(net.network_address.exploded.replace(":", "")[: net.prefixlen // 4])
+            suffix = "ip6.arpa"
+        if parts:
+            zone = ".".join(reversed(parts)) + "." + suffix
+            if zone not in zones:
+                zones.append(zone)
+    return [z for z in zones if not any(z != o and z.endswith("." + o) for o in zones)]
+
+
+def split_domains(given, extra, routes):
+    """What the VPN's DNS servers are for: the gateway's domains as given
+    (searched too), then the extras and the routes' reverse zones as
+    routing-only domains ("~" first)."""
+    out = []
+    for d in given:
+        d = d.strip().strip(".").lower()
+        if d and d not in out:
+            out.append(d)
+    for d in extra + reverse_zones(routes):
+        if d not in out and "~" + d not in out:
+            out.append("~" + d)
+    return out
+
+
+ADVICE = (
+    "every program on this system asks the servers in /etc/resolv.conf in turn, the VPN's first, and nothing can keep "
+    "those to the company's names; systemd-resolved can (DNS in the README)"
+)
+
+OUTCOMES = {
+    "off": "DNS: the VPN's servers take every name, as set",
+    "resolver": "DNS: a resolver on this machine routes names by domain: the VPN's servers get the company's names, the rest goes where it did",
+    "full": "DNS: the VPN takes all traffic (no split tunnel), so its servers take every name too",
+    "nodomains": "DNS: the VPN named no domain for its servers; add the company's domains in Preferences → DNS (or --domains) to keep them to those",
+    "none": "DNS: " + ADVICE,
+    "failed": "DNS: could not keep the VPN's servers to the company's names",
+}
+
+
+def split(t, cfg, log):
+    """After t.up(): the VPN's DNS servers kept to the company's names,
+    everything else going where it did before, where the system's resolver
+    can route by domain (see the module). Returns a word for the user when
+    there is something for them to do about it, else None."""
+    outcome = "off" if cfg.get("split_dns") == "no" else t.split_dns(extra_domains(cfg), log)
+    if outcome in OUTCOMES:
+        log(OUTCOMES[outcome])
+    if outcome == "none":
+        return "The VPN's DNS servers take every name; systemd-resolved would keep them to the company's (DNS in the README)"
+    if outcome == "nodomains":
+        return "The VPN named no domain for its DNS servers; add the company's under Preferences → DNS"
+    return None
 
 
 def mitigate(t, gateway, session, log):

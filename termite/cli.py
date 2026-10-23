@@ -14,7 +14,7 @@ def log(msg):
 
 def settings(args):
     cfg = config.load()
-    for key in ("gateway", "group", "browser", "backend", "connection", "dns"):
+    for key in ("gateway", "group", "browser", "backend", "connection", "dns", "split_dns", "domains"):
         value = getattr(args, key, None)
         if value:
             cfg[key] = value
@@ -32,10 +32,14 @@ def cmd_connect(args):
             log(f"already connected ({t.label})")
             return
         t.ensure(cfg["gateway"], log)
+        t.prepare_dns(cfg, log)
         if cfg["dns"] == "gateway":
             t.forget_dns(log)
         session = sso.sign_in(cfg["gateway"], cfg["group"], cfg["browser"] or None, log=log)
         t.up(session, log)
+        note = dns.split(t, cfg, log)
+        if note:
+            log(note)
         if cfg["dns"] != "gateway":
             note = dns.mitigate(t, cfg["gateway"], session, log)
             if note:
@@ -123,6 +127,8 @@ def main(argv=None):
         sp.add_argument("--backend", choices=["auto", "networkmanager", "openconnect"])
         sp.add_argument("--connection", help="NetworkManager connection name")
         sp.add_argument("--dns", choices=["fastest", "gateway"], help="after connecting, put the VPN's DNS server that answers best first (the default), or leave the gateway's order")
+        sp.add_argument("--split-dns", choices=["yes", "no"], help="keep the VPN's DNS servers to the company's names (the default, where a resolver can route by domain), or give them every name")
+        sp.add_argument("--domains", help="company domains besides the ones the VPN names, space or comma separated")
         return sp
 
     sub.add_parser("gui", help="open the window (the default)")

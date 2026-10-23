@@ -12,6 +12,8 @@ DEFAULTS = {
     "backend": "auto",  # auto | networkmanager | openconnect
     "connection": "Termite",  # NetworkManager connection name
     "dns": "fastest",  # fastest: after connecting, the VPN's DNS server that answers best first | gateway: as given
+    "split_dns": "yes",  # yes: the VPN's DNS servers only for the company's names, where a resolver can route by domain | no: for every name
+    "domains": "",  # company domains besides the ones the gateway names (space or comma separated)
     "menu": "yes",  # the AppImage's icon and menu entry (integrate): yes | no
 }
 

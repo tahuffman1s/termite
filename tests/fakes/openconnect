@@ -3,8 +3,10 @@
 # vpnc-script is its default; otherwise reads the cookie, "connects" (a
 # sleeping process standing in for the tunnel) and returns, as --background
 # does; the --script it was given runs as vpnc-script would on connect,
-# with the DNS servers FAKE_OC_DNS names, after that (FAKE_OC_SCRIPT_DELAY
-# seconds later), as the real one's does.
+# with the DNS servers FAKE_OC_DNS names, the split-DNS list FAKE_OC_SPLIT_DNS
+# and the split-tunnel routes FAKE_OC_ROUTES (addr/len each; none: the VPN
+# takes all traffic), after that (FAKE_OC_SCRIPT_DELAY seconds later), as the
+# real one's does.
 [ "$1" = --version ] && {
   echo "OpenConnect version v9.99-fake"
   echo "Default vpnc-script (override with --script): $(dirname "$0")/vpnc-script"
@@ -21,6 +23,18 @@ python3 -c 'import signal, sys, time; signal.signal(signal.SIGINT, lambda *a: sy
 echo $! >"$pidfile"
 if [ -n "$script" ]; then
   # As the real one: the script runs after --background has returned, FAKE_OC_SCRIPT_DELAY seconds later.
-  ( sleep "${FAKE_OC_SCRIPT_DELAY:-0}"; reason=connect TUNDEV=tun9 INTERNAL_IP4_DNS="${FAKE_OC_DNS:-}" INTERNAL_IP6_DNS= CISCO_DEF_DOMAIN=corp.example.com "$script" ) </dev/null >/dev/null 2>&1 &
+  (
+    sleep "${FAKE_OC_SCRIPT_DELAY:-0}"
+    n4=0; n6=0
+    for r in ${FAKE_OC_ROUTES:-}; do
+      case "$r" in
+        *:*) export "CISCO_IPV6_SPLIT_INC_${n6}_ADDR=${r%/*}" "CISCO_IPV6_SPLIT_INC_${n6}_MASKLEN=${r#*/}"; n6=$((n6 + 1)) ;;
+        *) export "CISCO_SPLIT_INC_${n4}_ADDR=${r%/*}" "CISCO_SPLIT_INC_${n4}_MASKLEN=${r#*/}"; n4=$((n4 + 1)) ;;
+      esac
+    done
+    [ "$n4" -eq 0 ] || export CISCO_SPLIT_INC=$n4
+    [ "$n6" -eq 0 ] || export CISCO_IPV6_SPLIT_INC=$n6
+    reason=connect TUNDEV=tun9 INTERNAL_IP4_DNS="${FAKE_OC_DNS:-}" INTERNAL_IP6_DNS= CISCO_DEF_DOMAIN=corp.example.com CISCO_SPLIT_DNS="${FAKE_OC_SPLIT_DNS:-}" "$script"
+  ) </dev/null >/dev/null 2>&1 &
 fi
 echo "Connected as 10.0.0.2 (fake)" >&2

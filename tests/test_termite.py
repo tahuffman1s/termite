@@ -91,7 +91,7 @@ class Base(unittest.TestCase):
         # The fake pkexec, even where a real setuid one is installed.
         self.elevator = tunnel.elevator
         tunnel.elevator = lambda name: os.path.join(FAKES, name)
-        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "FAKE_OC_DNS", "FAKE_OC_SCRIPT_DELAY", "APPIMAGE"):
+        for var in ("TERMITE_CHROMIUM", "TERMITE_CHROMIUM_LIBS", "TERMITE_BROWSER", "TERMITE_PROFILE", "TERMITE_GATEWAY", "TERMITE_GROUP", "FAKE_BROWSER", "FAKE_OC_FAIL", "FAKE_OC_DNS", "FAKE_OC_SPLIT_DNS", "FAKE_OC_ROUTES", "FAKE_OC_SCRIPT_DELAY", "APPIMAGE"):
             os.environ.pop(var, None)
 
     def tearDown(self):
@@ -494,6 +494,20 @@ class Dns(Base):
         self.assertEqual(dns.names("vpn.example.com"), ["vpn.example.com", "example.com"])
         self.assertEqual(dns.names("10.0.0.1"), ["example.com"])
 
+    def test_split_domains(self):
+        self.assertEqual(dns.extra_domains({"domains": " Other.example.com, ~lab.example.net .trail. other.example.com"}), ["other.example.com", "lab.example.net", "trail"])
+        self.assertEqual(dns.extra_domains({"domains": ""}), [])
+        self.assertEqual(dns.extra_domains({}), [])
+        self.assertEqual(dns.reverse_zones(["10.91.0.0/16", "172.16.4.0/22", "192.0.2.0/24", "2001:db8:1::/48", "0.0.0.0/0", "nonsense"]),
+                         ["91.10.in-addr.arpa", "16.172.in-addr.arpa", "2.0.192.in-addr.arpa", "1.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"])  # fmt: skip
+        self.assertEqual(dns.reverse_zones(["10.91.5.0/24", "10.0.0.0/8", "10.91.0.0/16"]), ["10.in-addr.arpa"])  # the broad one covers the rest
+        self.assertEqual(dns.reverse_zones(["10.0.0.0/7", "10.1.2.3/32"]), ["3.2.1.10.in-addr.arpa"])  # less than an octet: no zone
+        self.assertEqual(
+            dns.split_domains(["corp.example.com", "corp.example.com", "Lab.example.com."], ["other.example.com", "corp.example.com"], ["10.91.0.0/16"]),
+            ["corp.example.com", "lab.example.com", "~other.example.com", "~91.10.in-addr.arpa"],
+        )
+        self.assertEqual(dns.split_domains([], [], []), [])
+
     def test_read_resolv_conf(self):
         self.resolv_conf("10.0.0.1", "10.0.0.2")
         self.assertEqual(dns.read_resolv_conf(), (RESOLV_CONF.format("10.0.0.1", "10.0.0.2"), ["10.0.0.1", "10.0.0.2"]))
@@ -574,6 +588,71 @@ class Dns(Base):
         self.assertEqual(note, "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
         self.assertEqual(read(os.path.join(self.tmp, "resolvectl.calls")).splitlines(), ["dns tun9", "dns tun9 127.0.0.1 127.0.0.2"])
         self.assertEqual(dns.read_resolv_conf()[1], ["127.0.0.2", "127.0.0.1"])  # resolved's own file, left to it
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_keeps_the_servers_to_the_companys_names_in_systemd_resolved(self):
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        os.environ["FAKE_OC_SPLIT_DNS"] = "corp.example.com,lab.example.com"
+        os.environ["FAKE_OC_ROUTES"] = "10.91.0.0/16 192.0.2.0/24 2001:db8:1::/48"
+        self.resolv_conf("127.0.0.2", "127.0.0.1", text="# This is /run/systemd/resolve/resolv.conf managed by man:systemd-resolved(8).\nnameserver {}\nnameserver {}\n")
+        self.fake_tool("resolvectl", '[ "$1 $2" = "dns tun9" ] && [ $# -eq 2 ] && echo "Link 9 (tun9): 127.0.0.2 127.0.0.1"; exit 0')
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.prepare_dns({"split_dns": "yes", "domains": "other.example.com"}, lambda m: None)
+        t.up(SESSION_DICT, lambda m: None)
+        self.assertEqual(t.domains, ["corp.example.com", "corp.example.com", "lab.example.com"])
+        self.assertEqual(t.routes, ["10.91.0.0/16", "192.0.2.0/24", "2001:db8:1::/48"])
+        lines = []
+        self.assertIsNone(dns.split(t, {"split_dns": "yes", "domains": "other.example.com"}, lines.append))
+        domains = "corp.example.com lab.example.com ~other.example.com ~91.10.in-addr.arpa ~2.0.192.in-addr.arpa ~1.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
+        self.assertEqual(read(os.path.join(self.tmp, "resolvectl.calls")).splitlines(), ["dns tun9", f"domain tun9 {domains}", "default-route tun9 no"])
+        self.assertEqual(lines[-1], f"DNS: the VPN's servers get {domains.replace(' ', ', ')} and no other name")
+        # The order check after it touches the servers only.
+        self.assertEqual(dns.mitigate(t, "vpn.example.com", SESSION_DICT, lambda m: None), "Using DNS server 127.0.0.1 first; 127.0.0.2 no answer for vpn.example.com, example.com")
+        self.assertEqual(read(os.path.join(self.tmp, "resolvectl.calls")).splitlines()[-1], "dns tun9 127.0.0.1 127.0.0.2")
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_split_dns_off_or_without_routes(self):
+        os.environ["FAKE_OC_DNS"] = "127.0.0.1"
+        os.environ["FAKE_OC_ROUTES"] = "10.91.0.0/16"
+        self.fake_tool("resolvectl", '[ "$1 $2" = "dns tun9" ] && [ $# -eq 2 ] && echo "Link 9 (tun9): 127.0.0.1"; exit 0')
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        lines = []
+        self.assertIsNone(dns.split(t, {"split_dns": "no"}, lines.append))
+        self.assertEqual(lines[-1], "DNS: the VPN's servers take every name, as set")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "resolvectl.calls")))
+        time.sleep(0.5)
+        t.down()
+        # The VPN takes all traffic: its servers keep every name.
+        del os.environ["FAKE_OC_ROUTES"]
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        self.assertEqual(t.dns, ["127.0.0.1"])
+        self.assertEqual(t.routes, [])
+        self.assertIsNone(dns.split(t, {"split_dns": "yes"}, lines.append))
+        self.assertIn("takes all traffic", lines[-1])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "resolvectl.calls")))
+        time.sleep(0.5)
+        t.down()
+
+    def test_openconnect_split_dns_needs_a_resolver_that_routes_by_domain(self):
+        # vpnc-script wrote resolv.conf itself: every program asks its servers in turn.
+        os.environ["FAKE_OC_DNS"] = "127.0.0.2 127.0.0.1"
+        os.environ["FAKE_OC_ROUTES"] = "10.91.0.0/16"
+        self.resolv_conf("127.0.0.2", "127.0.0.1")
+        t = tunnel.OpenConnect("pkexec")
+        t.pidfile = os.path.join(self.tmp, "oc.pid")
+        t.up(SESSION_DICT, lambda m: None)
+        lines = []
+        note = dns.split(t, {"split_dns": "yes", "domains": ""}, lines.append)
+        self.assertEqual(note, "The VPN's DNS servers take every name; systemd-resolved would keep them to the company's (DNS in the README)")
+        self.assertIn("systemd-resolved can", lines[-1])
+        self.assertEqual(read(dns.RESOLV_CONF), RESOLV_CONF.format("127.0.0.2", "127.0.0.1"))  # untouched
         time.sleep(0.5)
         t.down()
 
@@ -660,6 +739,32 @@ class Dns(Base):
         n = read(os.path.join(self.tmp, "calls")).count("connection modify")
         t.forget_dns(lines.append)
         self.assertEqual(read(os.path.join(self.tmp, "calls")).count("connection modify"), n)
+
+    def test_networkmanager_extra_domains_on_the_profile(self):
+        with open(os.path.join(self.tmp, "connections"), "w") as f:
+            f.write("Termite\n")
+        t = tunnel.NetworkManager("Termite")
+        lines = []
+        t.prepare_dns({"split_dns": "yes", "domains": "other.example.com, lab.example.net"}, lines.append)
+        self.assertEqual(read(os.path.join(self.tmp, "search")).strip(), "~other.example.com,~lab.example.net")
+        self.assertEqual(lines[-1], "DNS: 'Termite' also sends other.example.com, lab.example.net to the VPN's servers")
+        n = read(os.path.join(self.tmp, "calls")).count("connection modify")
+        t.prepare_dns({"split_dns": "yes", "domains": "other.example.com lab.example.net"}, lines.append)  # the same: left alone
+        self.assertEqual(read(os.path.join(self.tmp, "calls")).count("connection modify"), n)
+        t.prepare_dns({"split_dns": "no", "domains": "other.example.com"}, lines.append)
+        self.assertEqual(read(os.path.join(self.tmp, "search")).strip(), "")
+        self.assertEqual(lines[-1], "DNS: 'Termite' has no domains of its own again")
+        t.prepare_dns({"split_dns": "yes", "domains": ""}, lines.append)  # nothing to add, nothing there: left alone
+        self.assertEqual(read(os.path.join(self.tmp, "calls")).count("connection modify"), n + 1)
+        # Once up, NetworkManager routes by domain itself, when a resolver of its own answers the machine.
+        self.resolv_conf("127.0.0.53", "::1", text="nameserver {}\nnameserver {}\n")
+        self.assertIsNone(dns.split(t, {"split_dns": "yes"}, lines.append))
+        self.assertIn("routes names by domain", lines[-1])
+        self.resolv_conf("127.0.0.2", "127.0.0.1", text="# Generated by NetworkManager\nnameserver {}\nnameserver {}\n")
+        self.assertIn("systemd-resolved would keep them", dns.split(t, {"split_dns": "yes"}, lines.append))
+        self.assertIn("systemd-resolved can", lines[-1])
+        self.assertIsNone(dns.split(t, {"split_dns": "no"}, lines.append))
+        self.assertEqual(lines[-1], "DNS: the VPN's servers take every name, as set")
 
     def test_networkmanager_first_one_answering_is_left(self):
         self.resolv_conf("127.0.0.1", "127.0.0.2", text="nameserver {}\nnameserver {}\n")
@@ -781,9 +886,12 @@ class Config(Base):
         cfg = config.load()
         self.assertEqual(cfg["backend"], "auto")
         self.assertEqual(cfg["dns"], "fastest")
-        cfg.update(gateway="vpn.example.com", extra="ignored")
+        self.assertEqual(cfg["split_dns"], "yes")
+        self.assertEqual(cfg["domains"], "")
+        cfg.update(gateway="vpn.example.com", domains="other.example.com", extra="ignored")
         config.save(cfg)
         self.assertEqual(config.load()["gateway"], "vpn.example.com")
+        self.assertEqual(config.load()["domains"], "other.example.com")
         self.assertNotIn("extra", json.loads(read(config.path())))
         os.environ["TERMITE_GATEWAY"] = "other.example.com"
         self.assertEqual(config.load()["gateway"], "other.example.com")

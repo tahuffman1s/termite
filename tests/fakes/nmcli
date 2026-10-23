@@ -9,6 +9,8 @@ case "$*" in
   "-g vpn.service-type connection show "*) echo org.freedesktop.NetworkManager.openconnect ;;
   "-g IP4.DNS,IP6.DNS connection show "*) cat "$FAKE_NM/dns" 2>/dev/null ;;
   "-g ipv4.dns,ipv6.dns connection show "*) cat "$FAKE_NM/pin" 2>/dev/null ;;
+  "-g ipv4.dns-search connection show "*) cat "$FAKE_NM/search" 2>/dev/null ;;
+  "connection modify Termite ipv4.dns-search "*) [ $# -eq 5 ] && echo "$5" >"$FAKE_NM/search" || : >"$FAKE_NM/search" ;;
   "connection modify Termite ipv4.dns "*) [ $# -eq 5 ] && echo "$5" >"$FAKE_NM/pin" || : >"$FAKE_NM/pin" ;;
   "connection add "*) echo "Termite" >>"$FAKE_NM/connections" ;;
   "--wait 120 connection up "*)

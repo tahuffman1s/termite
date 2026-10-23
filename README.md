@@ -33,10 +33,11 @@ brings up the tunnel.
   VPN shows in your network menu
 - 🐜 **Tray icon**: see at a glance whether you're connected; connect and
   disconnect from the menu
-- 🩺 **DNS that answers**: after connecting, the VPN's DNS servers are each
-  asked for a company name and an outside one, and the one that answers
-  both, fastest, goes first, so a server that drops queries can't hold up
-  every lookup for five seconds
+- 🩺 **DNS that answers**: the VPN's DNS servers get only the company's
+  names, and the rest of the internet keeps going to your usual DNS, so a
+  VPN server that stops answering can't hold up every lookup for five
+  seconds; and each of them is asked for a company name and an outside
+  one, the one that answers both, fastest, going first
 - 🎨 **A proper GNOME app**: current GTK 4 and libadwaita, light and dark,
   adaptive down to phone size
 - 🐧 **Any distribution**: Ubuntu, Debian, Fedora, Arch, openSUSE, NixOS…
@@ -81,6 +82,36 @@ termite info                     what was found on this system
 ```
 
 Settings live in `~/.config/termite/config.json`.
+</details>
+
+<details>
+<summary><b>DNS</b></summary>
+
+With a split tunnel (the usual kind: only the company's networks go through
+the VPN), Termite keeps the VPN's DNS servers to the company's names: the
+domains the gateway names, any you add under **Preferences → DNS → Company
+Domains** (or `--domains`), and the reverse zones of the VPN's networks.
+Every other name goes to your usual DNS, as before connecting, so a VPN
+server that stops answering can't hold up every website for five seconds.
+The Connection Log shows the domains.
+
+This needs a resolver on your computer that routes names by domain:
+systemd-resolved (Ubuntu, Fedora and Arch have it on by default), or
+NetworkManager's own (`dns=systemd-resolved` or `dns=dnsmasq` in
+`NetworkManager.conf`). Where programs read `/etc/resolv.conf` directly
+instead (it lists the VPN's servers, not `127.0.0.53`), they ask its
+servers in turn, the VPN's first, and nothing can do better than put the
+one that answers first, which Termite does; the log says so. To switch to
+systemd-resolved:
+
+```sh
+sudo systemctl enable --now systemd-resolved
+sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+sudo systemctl restart NetworkManager   # if that is how you connect to the network
+```
+
+A VPN that takes all traffic keeps its DNS servers for every name. The
+switch under **Preferences → DNS** turns this off.
 </details>
 
 <details>
